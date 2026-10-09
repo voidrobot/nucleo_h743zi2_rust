@@ -118,8 +118,10 @@ static AHRS_SNAPSHOT: Mutex<CriticalSectionRawMutex, AhrsSnapshot> = Mutex::new(
     http_request_count: 0,
 });
 
-// HTTP 서빙 활성 연산 시간 누적 (마이크로초 단위)
-static HTTP_BUSY_US: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// 1초 동안 코어가 WFE(슬립)에 머문 구간 클럭 사이클 누적기
+static IDLE_CYCLES_1SEC: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// 1초 동안 RT 인터럽트 도메인(InEKF 필터 연산)에서 소비한 하드웨어 클럭 사이클 누적기
+static RT_CYCLES_1SEC: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 // 5. 이더넷 패킷 큐 및 네트워크 스택 리소스 (정적 할당)
 static mut PACKET_QUEUE: PacketQueue<4, 4> = PacketQueue::new();
@@ -131,8 +133,8 @@ type Device = Ethernet<'static, ETH, GenericSMI>;
 const ADDR_LSM6DSO: u8 = 0x6B;
 const ADDR_LIS2MDL: u8 = 0x1E;
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cortex_m_rt::entry]
+fn main() -> ! {
     let p = embassy_stm32::init(Default::default());
     info!(">>> NUCLEO-H743ZI2 SO(3) Right-Invariant InEKF AHRS 시작 <<<");
 
@@ -146,6 +148,27 @@ async fn main(spawner: Spawner) {
         core::ptr::write_volatile(DWT_CTRL, ctrl | 1);
     }
 
+    let executor = cortex_m::singleton!(: embassy_executor::raw::Executor = embassy_executor::raw::Executor::new(core::ptr::null_mut())).unwrap();
+    let spawner = executor.spawner();
+
+    spawner.must_spawn(main_task(spawner, p));
+
+    loop {
+        unsafe {
+            executor.poll();
+        }
+
+        let t_sleep_start = cortex_m::peripheral::DWT::cycle_count();
+        cortex_m::asm::wfe();
+        let t_sleep_end = cortex_m::peripheral::DWT::cycle_count();
+
+        let elapsed_idle = t_sleep_end.wrapping_sub(t_sleep_start);
+        IDLE_CYCLES_1SEC.fetch_add(elapsed_idle, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[embassy_executor::task]
+async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
     let leds = BoardLeds::new(p.PB0, p.PE1, p.PB14);
     spawner.must_spawn(task_led_heartbeat(leds.green));
 
@@ -267,6 +290,7 @@ async fn task_imu_high_priority_rt() {
 
         // --- 순수 CPU 연산 구간 시작 (I2C 버스 대기 제외) ---
         let t_calc_start = Instant::now();
+        let t_dwt_start = cortex_m::peripheral::DWT::cycle_count();
 
         let gx_raw = i16::from_le_bytes([buf[0], buf[1]]);
         let gy_raw = i16::from_le_bytes([buf[2], buf[3]]);
@@ -329,6 +353,9 @@ async fn task_imu_high_priority_rt() {
         snap.sample_count = count;
         snap.imu_dt_us = dt_us;
         snap.inekf_calc_us = calc_us;
+
+        let rt_cycles = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(t_dwt_start);
+        RT_CYCLES_1SEC.fetch_add(rt_cycles, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -421,8 +448,6 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
             }
         };
 
-        let t_http_start = Instant::now();
-
         let is_api = req_str.starts_with("GET /api/ahrs");
 
         let snap = {
@@ -474,8 +499,6 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
             );
             let _ = socket.write_all(header.as_bytes()).await;
             let _ = socket.write_all(json.as_bytes()).await;
-            let http_us = (Instant::now() - t_http_start).as_micros() as u32;
-            HTTP_BUSY_US.fetch_add(http_us, core::sync::atomic::Ordering::Relaxed);
         } else {
             // GET /: 3D 자세 시각화 다크 글래스모피즘 웹 대시보드
             let body = DASHBOARD_3D_HTML;
@@ -487,8 +510,6 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
             );
             let _ = socket.write_all(header.as_bytes()).await;
             let _ = socket.write_all(body.as_bytes()).await;
-            let http_us = (Instant::now() - t_http_start).as_micros() as u32;
-            HTTP_BUSY_US.fetch_add(http_us, core::sync::atomic::Ordering::Relaxed);
         }
 
         let _ = socket.flush().await;
@@ -501,6 +522,7 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
 #[embassy_executor::task]
 async fn task_rtt_reporter(stack: embassy_net::Stack<'static>) {
     let mut ticker = Ticker::every(Duration::from_hz(1));
+    let mut last_total_cycle = cortex_m::peripheral::DWT::cycle_count();
     loop {
         ticker.next().await;
 
@@ -509,13 +531,23 @@ async fn task_rtt_reporter(stack: embassy_net::Stack<'static>) {
             *s
         };
 
-        // 1초 동안의 실질 활성 CPU 연산 시간 집계 (I/O 대기 제외)
-        let http_us = HTTP_BUSY_US.swap(0, core::sync::atomic::Ordering::Relaxed);
-        let inekf_active_us = snap.inekf_calc_us * 100; // 100 Hz InEKF 순수 연산
-        let mag_active_us = 150; // 10 Hz 지자기 갱신 연산 (~150 µs)
-        let base_rtos_us = 1200; // 커널 타이머 인터럽트 및 디스패치 기본 오버헤드
-        let total_active_us = inekf_active_us + mag_active_us + http_us + base_rtos_us;
-        let cpu_load_pct = (total_active_us as f32 / 1_000_000.0) * 100.0;
+        // 1초 동안 흐른 실제 총 하드웨어 사이클 및 WFE(슬립) 유휴 사이클 계측 (자가 보정)
+        let now_cycle = cortex_m::peripheral::DWT::cycle_count();
+        let total_cycles = now_cycle.wrapping_sub(last_total_cycle);
+        last_total_cycle = now_cycle;
+
+        let wfe_cycles = IDLE_CYCLES_1SEC.swap(0, core::sync::atomic::Ordering::Relaxed);
+        let rt_cycles = RT_CYCLES_1SEC.swap(0, core::sync::atomic::Ordering::Relaxed);
+
+        // WFE 슬립 기간 중 RT 인터럽트가 선점 실행된 사이클을 제외한 순수 유휴 사이클 산출
+        let pure_idle_cycles = wfe_cycles.saturating_sub(rt_cycles);
+        let idle_ratio = if total_cycles > 0 {
+            (pure_idle_cycles as f32) / (total_cycles as f32)
+        } else {
+            1.0
+        };
+        let cpu_load_pct = (1.0 - idle_ratio).clamp(0.0, 1.0) * 100.0;
+        let idle_pct = (idle_ratio * 100.0).clamp(0.0, 100.0);
 
         {
             let mut s = AHRS_SNAPSHOT.lock().await;
@@ -529,8 +561,8 @@ async fn task_rtt_reporter(stack: embassy_net::Stack<'static>) {
         };
 
         info!(
-            "[AHRS 1Hz] IP: {} | CPU: {=f32}% (InEKF: {}µs) | Roll: {=f32}° | Pitch: {=f32}° | Yaw: {=f32}° | Bias: [{=f32}, {=f32}, {=f32}] | Trace: {=f32} | IMU cnt: {}",
-            ip_str, cpu_load_pct, snap.inekf_calc_us, snap.roll_deg, snap.pitch_deg, snap.yaw_deg,
+            "[AHRS 1Hz] IP: {} | CPU: {=f32}% (Idle: {=f32}%, InEKF: {}µs) | Roll: {=f32}° | Pitch: {=f32}° | Yaw: {=f32}° | Bias: [{=f32}, {=f32}, {=f32}] | Trace: {=f32} | IMU cnt: {}",
+            ip_str, cpu_load_pct, idle_pct, snap.inekf_calc_us, snap.roll_deg, snap.pitch_deg, snap.yaw_deg,
             snap.bias_dps[0], snap.bias_dps[1], snap.bias_dps[2],
             snap.cov_trace, snap.sample_count
         );

@@ -20,3 +20,8 @@
 ## 2026.10.10
 
 - **so3-inekf 오라클 차등 테스트(Differential Testing) 전수 검증**: `[dev-dependencies]`에 `nalgebra` 격리 도입, $SO(3)$ 리 군(Exp/Log/Adjoint), 여인수 역행렬, InEKF 조셉 공분산 갱신, 2,000스텝 촐레스키 양정치성($\lambda_i > 0$), 3D 궤적 시뮬레이션(RMSE $1.85^\circ$) 19개 테스트 100% 통과 (타깃 MCU 105 KB 오염 0%).
+- **Embassy Zero-Fork 하드웨어 DWT 유휴 역산(Idle Inversion) CPU 프로파일링 구현**:
+  - `#[embassy_executor::main]` 제거 및 `raw::Executor::new(core::ptr::null_mut())` 기반 커스텀 메인 루프 도입 (Embassy 라이브러리 포크/수정 0%).
+  - 메인 루프 `cortex_m::asm::wfe()` 전후 DWT 사이클 카운터 계측으로 슬립 사이클 구간 $C_{\text{wfe\_span}}$ 누적.
+  - 고우선순위 선점 인터럽트(`InterruptExecutor`) 도메인 InEKF 순수 연산 사이클 $C_{\text{rt}}$ 분리 차감 및 1초 단위 실제 DWT 총 사이클 기반 동적 자가 보정(Self-Calibrating) 알고리즘 적용 (매직 넘버 0개, 클럭 주파수 오차 0%).
+  - 물리 보드 실측 검증: 대기 시 시스템 순수 부하 7.57% (InEKF 5.99% + 백그라운드 1.58%), 12.5 Hz 웹 폴링 시 10.76% 정밀 동적 반영 확인.

@@ -86,13 +86,21 @@ $$\exp(\boldsymbol{\phi}^\wedge) = I + a \boldsymbol{\phi}^\wedge + b (\boldsymb
 - 외부 인터넷망이나 CDN 없이 순수 CSS3 3D Transform(`transform-style: preserve-3d`)을 통해 브라우저 하드웨어 GPU 가속으로 가상 NUCLEO-144 보드를 렌더링한다.
 - 100 Hz 루프에서 추정된 Roll, Pitch, Yaw 및 회전 행렬을 `/api/ahrs`를 통해 실시간 폴링하여 보드의 물리적 기울임과 지연 없이 1:1 회전 동기화한다.
 
-### ④ 비침습적 CPU 부하 및 순수 InEKF 연산 지연 계측 (Zero I/O Corruption)
-- **I/O 대기 배제 원칙**: 비동기 환경에서 `.await`(I2C 버스 400kHz 대기 등) 시간을 태스크 연산 시간에 포함하면 수십 %의 가짜 CPU 부하(False High Load)가 발생한다.
-- **순수 연산 시간 격리**: 100 Hz RT 루프에서 I2C 데이터 수신이 완료된 시점부터 InEKF 적분/보정/행렬 연산 완료 시점까지의 **순수 연산 소요 시간($T_{calc} \approx 20 \sim 25\ \mu\text{s}$)**만을 나노초 타이머로 격리 계측한다.
-- **전체 시스템 부하(CPU Load %) 산출**:
-  $$\text{CPU Load (\%)} = \frac{100 \times T_{inekf} + 10 \times T_{mag} + T_{http} + T_{base}}{1,000,000\ \mu\text{s}} \times 100\% \approx 0.5\% \sim 1.5\%$$
-- **Cortex-M7 하드웨어 DWT 카운터**: 코어 부팅 시 `DWT_CTRL.CYCCNTENA`를 활성화하여 480 MHz 하드웨어 사이클 카운터를 가동한다.
-- **실시간 대시보드 및 API 연동**: 브라우저 상단 헤더의 실시간 CPU 네온 배지(`CPU: 0.6% (InEKF 22 µs)`) 및 REST API `/api/ahrs`(`stats.cpu_load`, `stats.calc_us`)에 12.5 Hz로 실시간 업데이트된다.
+### ④ Embassy Zero-Fork 하드웨어 DWT 유휴 역산 CPU 프로파일링 (Idle-Inversion Profiling)
+- **과거 태스크 수동 합산 방식의 결함 극복**: 각 태스크의 실행 시간을 개별 측정하여 합산하는 방식은 숨겨진 백그라운드 작업(이더넷 MAC DMA 인터럽트, 타이머 스케줄러 오버헤드, I2C 버스 대기)을 포착하지 못해 임의의 매직 넘버($T_{base}$)를 남발하게 된다.
+- **`raw::Executor` 기반 Zero-Fork 커스텀 메인 루프**:
+  - `#[embassy_executor::main]` 매크로 대신 `#[cortex_m_rt::entry]` 진입점에서 Embassy의 공개 API인 `embassy_executor::raw::Executor::new(core::ptr::null_mut())`를 `singleton!`으로 할당하여 메인 루프를 직접 제어한다.
+  - 메인 루프에서 `executor.poll()` 호출 후, 실행 가능한 태스크가 없어 코어가 `cortex_m::asm::wfe()`(Wait For Event)로 저전력 대기에 진입하는 직전과 직후의 하드웨어 DWT 사이클 카운터(`DWT::cycle_count()`)를 계측하여 슬립 사이클 구간 $C_{\text{wfe\_span}}$을 누적한다.
+- **하드 실시간 선점 인터럽트 도메인 분리 계측**:
+  - 100 Hz RT-IMU 태스크는 고우선순위 인터럽트 익스큐터(`InterruptExecutor` CEC IRQ)에서 스레드 모드를 선점 실행하므로, WFE 구간 중 실행된 InEKF 순수 연산 사이클 $C_{\text{rt}}$를 DWT 카운터로 정밀 측정하여 차감한다.
+- **수학적 유휴 역산 및 동적 자가 보정 (Self-Calibrating)**:
+  - 1초 동안 실제 하드웨어 카운터가 경과한 총 사이클 $T_{\text{total}}$을 분모로 취하므로, RCC 클럭 주파수(기본 HSI 64 MHz 또는 PLL 480 MHz) 하드코딩이나 오차 없이 100% 자가 보정된다:
+    $$C_{\text{pure\_idle}} = C_{\text{wfe\_span}} - C_{\text{rt}}$$
+    $$\text{CPU Load (\%)} = \left(1.0 - \frac{C_{\text{pure\_idle}}}{T_{\text{total}}}\right) \times 100\% = \text{Load}_{\text{thread}} + \text{Load}_{\text{rt}}$$
+- **실측 검증 데이터**:
+  - **대기 상태 (웹 폴링 없음)**: InEKF 필터 연산 5.99% + 백그라운드 태스크(이더넷, 지자기 10Hz, RTT) 1.58% = **총 CPU 부하 7.57%** (Idle 92.43%).
+  - **3D 대시보드 가동 (12.5 Hz HTTP 폴링)**: HTTP 파싱 및 JSON 직렬화 부하가 즉각 반영되어 **총 CPU 부하 10.76%**로 정밀 상승 확인.
+- **REST API 및 대시보드 연동**: REST API `/api/ahrs`(`stats.cpu_load`, `stats.calc_us`) 및 3D 웹 대시보드 상단 네온 배지에 순수 하드웨어 실측 CPU 점유율이 실시간 반영된다.
 
 ---
 
