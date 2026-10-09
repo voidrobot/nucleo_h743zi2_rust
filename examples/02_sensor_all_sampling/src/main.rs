@@ -108,17 +108,50 @@ async fn main(spawner: Spawner) {
 }
 
 /// 6종 센서의 WHO_AM_I 검증 및 초기 설정
+///
+/// =========================================================================================
+/// [엔지니어링 샘플링 정책 및 DSP 안티-에일리어싱(Anti-Aliasing) 설계 배경]
+/// =========================================================================================
+///
+/// 1. 마스터 타이밍 권한(Master Timing Authority)의 단일화:
+///    - 센서(LSM6DSO 등) 내부 타이머는 실리콘 온칩 RC 발진기로 구동되며, 온도 드리프트 및 공정
+///      편차로 인해 최대 ±1% ~ ±5% 수준의 심각한 주파수 오차를 갖는다.
+///    - 반면 메인보드 MCU(STM32H743ZI)는 온도 보상 능력이 우수한 ±20 ppm 급 외부 수정 진동자
+///      (HSE Crystal, 8~25 MHz) 기반 PLL로 480 MHz 시스템 클럭 및 하드웨어 타이머를 구동한다.
+///    - 따라서 AHRS 융합 알고리즘의 시간 간격(dt) 무결성을 보장하기 위한 기준 클럭은 반드시
+///      메인보드 MCU 타이머(`embassy_time::Ticker`)가 절대적 마스터 권한을 행사해야 한다.
+///
+/// 2. 비트 주파수(Beating / Moiré Effect) 및 위상 지터 방어:
+///    - 만약 MCU가 100 Hz로 폴링하고 센서가 104 Hz로 내부 샘플링할 경우, 4 Hz 차이 주파수로 인해
+///      MCU가 어떤 주기에는 방금 생성된 최신 데이터를 읽고, 어떤 주기에는 10ms 이전 데이터를
+///      읽는 비트 현상(Beating) 및 최대 9.6ms의 샘플링 위상 지터(Phase Jitter)가 발생한다.
+///    - 이를 극복하기 위해 센서 ODR을 타깃 주기보다 훨씬 높은 416 Hz(약 4.16배 오버샘플링)로
+///      설정하여, MCU가 언제 I2C 읽기를 수행하더라도 레지스터에는 항상 1~2.4ms 이내의 최신
+///      샘플이 대기하도록 보장한다.
+///
+/// 3. 나이퀴스트-섀넌 정리(Nyquist-Shannon) 기반 온칩 LPF2 안티-에일리어싱:
+///    - 센서를 416 Hz로 구동하더라도 MCU가 100 Hz로 다운샘플링하여 수신하므로, 50 Hz(나이퀴스트
+///      한계 주파수)를 초과하는 로봇 모터 진동 및 고주파 기계 노이즈는 0~50 Hz 대역으로 폴딩되어
+///      치명적인 에일리어싱 왜곡(Aliasing Distortion)을 유발한다.
+///    - 이를 원천 차단하기 위해 LSM6DSO 내부 2차 디지털 저역통과필터(LPF2)를 활성화하고,
+///      차단 주파수(Cutoff Frequency)를 ODR/10인 41.6 Hz(`CTRL8_XL = 0x20`)로 설정하여
+///      50 Hz 이상의 고주파 신호를 하드웨어 레벨에서 감쇠시킨 후 레지스터에 기록한다.
+/// =========================================================================================
 async fn init_sensors() {
     let mut bus = I2C_BUS.lock().await;
     let i2c = bus.as_mut().unwrap();
 
-    // 1. LSM6DSO (6축 IMU): WHO_AM_I=0x0F -> 0x6C
+    // 1. LSM6DSO (6축 고정밀 IMU): WHO_AM_I=0x0F -> 0x6C
     let mut who = [0u8; 1];
     let _ = i2c.blocking_write_read(ADDR_LSM6DSO, &[0x0F], &mut who);
     info!("  [LSM6DSO 6축 IMU] WHO_AM_I: 0x{:02X} (기대값: 0x6C)", who[0]);
-    // CTRL1_XL = 0x40 (Accel 104Hz, ±2g), CTRL2_G = 0x40 (Gyro 104Hz, ±250dps)
-    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x10, 0x40]);
-    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x11, 0x40]);
+
+    // CTRL1_XL = 0x62: ODR=416Hz (High-Performance), ±2g, LPF2_XL_EN=1 (LPF2 활성화)
+    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x10, 0x62]);
+    // CTRL2_G = 0x60: ODR=416Hz (High-Performance), ±250dps
+    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x11, 0x60]);
+    // CTRL8_XL = 0x20: HPCF_XL[2:0]=001b -> LPF2 Cutoff = ODR / 10 = 41.6 Hz (50Hz 나이퀴스트 보호)
+    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x17, 0x20]);
 
     // 2. LIS2MDL (3축 지자기): WHO_AM_I=0x4F -> 0x40
     let _ = i2c.blocking_write_read(ADDR_LIS2MDL, &[0x4F], &mut who);
@@ -127,11 +160,11 @@ async fn init_sensors() {
     let _ = i2c.blocking_write(ADDR_LIS2MDL, &[0x60, 0x00]);
     let _ = i2c.blocking_write(ADDR_LIS2MDL, &[0x62, 0x10]);
 
-    // 3. LIS2DW12 (보조 가속도계): WHO_AM_I=0x0F -> 0x44
+    // 3. LIS2DW12 (보조 3축 가속도계): WHO_AM_I=0x0F -> 0x44
     let _ = i2c.blocking_write_read(ADDR_LIS2DW12, &[0x0F], &mut who);
     info!("  [LIS2DW12 보조 가속도] WHO_AM_I: 0x{:02X} (기대값: 0x44)", who[0]);
-    // CTRL1 = 0x54 (100Hz ODR, High-Performance, ±2g)
-    let _ = i2c.blocking_write(ADDR_LIS2DW12, &[0x20, 0x54]);
+    // CTRL1 = 0x64 (200Hz ODR 고속 오버샘플링, High-Performance 14-bit, ±2g)
+    let _ = i2c.blocking_write(ADDR_LIS2DW12, &[0x20, 0x64]);
 
     // 4. LPS22HH (기압/온도): WHO_AM_I=0x0F -> 0xB3
     let _ = i2c.blocking_write_read(ADDR_LPS22HH, &[0x0F], &mut who);
@@ -155,6 +188,10 @@ async fn init_sensors() {
 }
 
 /// [Task 1: 100 Hz] 고속 IMU 모션 샘플링 (10ms 주기)
+///
+/// 메인보드 MCU(STM32H7)의 100 Hz Ticker가 타이밍 마스터 권한을 갖고 10ms 주기로 엄격히 폴링한다.
+/// 센서(LSM6DSO)는 416 Hz로 오버샘플링 중이며 41.6 Hz 온칩 LPF2로 50 Hz 초과 고주파 노이즈가 제거된
+/// 최신 데이터를 I2C 버스를 통해 원자적으로 획득한다.
 #[embassy_executor::task]
 async fn task_imu_100hz() {
     let mut ticker = Ticker::every(Duration::from_hz(100)); // 100 Hz (10ms)
