@@ -97,21 +97,51 @@ $$\exp(\boldsymbol{\phi}^\wedge) = I + a \boldsymbol{\phi}^\wedge + b (\boldsymb
 
 ---
 
-## 5. 실행 및 검증 가이드 (Verification)
+## 5. 빌드 및 실행 가이드 (Build & Run Guide)
 
 ### ① 호스트 유닛 테스트 (수학 불변성 검증)
+알고리즘 및 수학 연산 코어는 호스트 x86_64 타깃으로 격리 단위 테스트를 실행한다:
+
 ```bash
 cargo test --target x86_64-unknown-linux-gnu -p so3-inekf --lib
 ```
-- $SO(3)$ 지수/로그 왕복 오차, 특이점 테일러 전개, 중력 수렴 및 조셉 공분산 정상 검증.
+- $SO(3)$ 지수/로그 왕복 오차, 특이점 테일러 전개, 중력 수렴, ZARU 정지 감지 및 1D 지자기 디커플링 정상 검증 (6개 테스트 전원 통과).
 
-### ② 타깃 보드 플래시 및 실행
+### ② 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 펌웨어를 컴파일한다:
+
+```bash
+# Debug 바이너리 빌드
+cargo build --target thumbv7em-none-eabihf -p ahrs_so3_inekf_04
+
+# Release 최적화 바이너리 빌드 (100Hz RT-InEKF 및 이더넷 웹서버 최적화 필수)
+cargo build --target thumbv7em-none-eabihf -p ahrs_so3_inekf_04 --release
+```
+
+### ③ 메모리 풋프린트 점검 (Memory Footprint)
+컴파일된 ELF 바이너리의 Flash 및 RAM 정적 사용량을 확인한다:
+
+```bash
+cargo size --target thumbv7em-none-eabihf -p ahrs_so3_inekf_04 --release -- -A
+```
+- Flash 사용량: 약 100 KB (STM32H7 2MB 플래시의 약 4.8%)
+- RAM 사용량: 약 49 KB (STM32H7 1MB RAM의 약 4.7%)
+- 동적 힙 할당: 0 바이트 (Zero-Heap Invariant 달성)
+
+### ④ 타깃 보드 플래시 및 실행 (Flash & Run)
+NUCLEO 보드에 LAN 케이블과 USB(ST-LINK/V3E)를 연결한 뒤 워크스페이스 최상위 루트에서 플래시한다:
+
 ```bash
 cargo run -p ahrs_so3_inekf_04
+# 또는 릴리스 모드로 고속 플래시 (권장):
+cargo run -p ahrs_so3_inekf_04 --release
 ```
+
+### ⑤ 3D 대시보드 및 실시간 API 접속 확인
 - NUCLEO 보드가 실행되면 DHCP 서버로부터 IP(예: `192.168.50.93`)를 할당받는다.
-- 웹 브라우저 접속: `http://192.168.50.93/`
-- REST API 데이터 확인: `curl -s http://192.168.50.93/api/ahrs`
+- **웹 브라우저 3D 대시보드**: [http://192.168.50.93/](http://192.168.50.93/)
+  - 납작한 직육면체 본체와 Body Frame RGB 3축(Red: +X, Green: +Y, Blue: +Z)이 실시간 자세와 1:1 동기화.
+- **REST API 데이터 확인**: `curl -s http://192.168.50.93/api/ahrs`
 
 ---
 

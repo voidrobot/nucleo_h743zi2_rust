@@ -231,16 +231,36 @@ graph TD
 
 ---
 
-## 6. 실행 및 검증 방법 (Run & Verification)
+## 6. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 실행 명령어
-NUCLEO-H743ZI2 보드가 USB로 연결된 상태에서 워크스페이스 최상위 루트에서 아래 명령을 실행한다:
+### ① 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 명시하여 바이너리를 컴파일한다:
+
+```bash
+# Debug 바이너리 빌드
+cargo build --target thumbv7em-none-eabihf -p blinky_01
+
+# Release 최적화 바이너리 빌드
+cargo build --target thumbv7em-none-eabihf -p blinky_01 --release
+```
+
+### ② 메모리 풋프린트 점검 (Memory Footprint)
+컴파일된 ELF 바이너리의 Flash 및 RAM 섹션별 정적 사용량을 점검한다:
+
+```bash
+cargo size --target thumbv7em-none-eabihf -p blinky_01 --release -- -A
+```
+
+### ③ 타깃 보드 플래시 및 RTT 실행 (Flash & Run)
+NUCLEO-H743ZI2 보드가 USB(ST-LINK/V3E)로 연결된 상태에서 최상위 루트에서 플래시 및 RTT 로깅을 실행한다:
 
 ```bash
 cargo run -p blinky_01
+# 또는 릴리스 모드로 고속 플래시:
+cargo run -p blinky_01 --release
 ```
 
-### ② 기대 RTT 터미널 출력
+### ④ 기대 RTT 터미널 출력
 ```text
       INFO  ==========================================
       INFO  NUCLEO-H743ZI2 Embassy Blinky (Workspace)

@@ -159,16 +159,36 @@ graph LR
 
 ---
 
-## 5. 실행 및 하드웨어 검증 결과 (Run & Hardware Verification)
+## 5. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 실행 명령어
-NUCLEO-H743ZI2에 X-NUCLEO-IKS01A3를 장착하고 USB를 연결한 뒤 최상위 루트에서 실행한다:
+### ① 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 바이너리를 컴파일한다:
+
+```bash
+# Debug 바이너리 빌드
+cargo build --target thumbv7em-none-eabihf -p sensor_all_sampling_02
+
+# Release 최적화 바이너리 빌드 (100Hz RT-IMU 선점 루프 최적화 권장)
+cargo build --target thumbv7em-none-eabihf -p sensor_all_sampling_02 --release
+```
+
+### ② 메모리 풋프린트 점검 (Memory Footprint)
+컴파일된 ELF 바이너리의 Flash 및 RAM 정적 사용량을 확인한다:
+
+```bash
+cargo size --target thumbv7em-none-eabihf -p sensor_all_sampling_02 --release -- -A
+```
+
+### ③ 타깃 보드 플래시 및 RTT 실행 (Flash & Run)
+NUCLEO-H743ZI2에 X-NUCLEO-IKS01A3 센서 쉴드를 장착하고 USB(ST-LINK/V3E)를 연결한 뒤 최상위 루트에서 실행한다:
 
 ```bash
 cargo run -p sensor_all_sampling_02
+# 또는 릴리스 모드 실행 (권장):
+cargo run -p sensor_all_sampling_02 --release
 ```
 
-### ② 실제 타깃 하드웨어 계측 로그 (RTT 터미널 실측 스니펫)
+### ④ 실제 타깃 하드웨어 계측 로그 (RTT 터미널 실측 스니펫)
 
 ```text
 ============================================================

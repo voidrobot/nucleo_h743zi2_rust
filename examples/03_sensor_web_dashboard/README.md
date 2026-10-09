@@ -129,16 +129,36 @@ graph TD
 
 ---
 
-## 5. 실행 및 하드웨어 검증 결과 (Run & Hardware Verification)
+## 5. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 실행 명령어
-NUCLEO 보드에 LAN 케이블과 USB를 연결한 뒤 워크스페이스 최상위 루트에서 플래시한다:
+### ① 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 바이너리를 컴파일한다:
+
+```bash
+# Debug 바이너리 빌드
+cargo build --target thumbv7em-none-eabihf -p sensor_web_dashboard_03
+
+# Release 최적화 바이너리 빌드 (이더넷 네트워크 스택 및 웹서버 가속 필수)
+cargo build --target thumbv7em-none-eabihf -p sensor_web_dashboard_03 --release
+```
+
+### ② 메모리 풋프린트 점검 (Memory Footprint)
+컴파일된 ELF 바이너리의 Flash 및 RAM 정적 사용량을 확인한다:
+
+```bash
+cargo size --target thumbv7em-none-eabihf -p sensor_web_dashboard_03 --release -- -A
+```
+
+### ③ 타깃 보드 플래시 및 실행 (Flash & Run)
+NUCLEO 보드에 LAN 케이블과 USB(ST-LINK/V3E)를 연결한 뒤 워크스페이스 최상위 루트에서 플래시한다:
 
 ```bash
 cargo run -p sensor_web_dashboard_03
+# 또는 릴리스 모드 실행 (네트워크 권장):
+cargo run -p sensor_web_dashboard_03 --release
 ```
 
-### ② 타깃 하드웨어 DHCP 할당 및 실측 계측 로그 (RTT)
+### ④ 타깃 하드웨어 DHCP 할당 및 실측 계측 로그 (RTT)
 
 ```text
 0.000151 [INFO ] I2C1 400kHz 버스 초기화 완료 (PB8/PB9)

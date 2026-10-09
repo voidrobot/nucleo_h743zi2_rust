@@ -576,84 +576,218 @@ h1 span { color: var(--accent); }
 /* 3D Visualizer Scene */
 .scene3d {
   width: 100%;
-  height: 280px;
-  perspective: 700px;
+  height: 300px;
+  perspective: 800px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(circle, rgba(56,189,248,0.05) 0%, transparent 70%);
+  background: radial-gradient(circle at center, rgba(30, 41, 59, 0.4) 0%, rgba(9, 13, 22, 0.95) 75%);
   border-radius: 12px;
   overflow: hidden;
-}
-.cube {
-  width: 140px;
-  height: 20px;
   position: relative;
-  transform-style: preserve-3d;
-  transition: transform 0.05s linear;
 }
-.face {
-  position: absolute;
-  border: 1px solid rgba(56, 189, 248, 0.6);
+.camera-rig {
+  position: relative;
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.7rem;
-  font-weight: 700;
-  color: #fff;
-  border-radius: 4px;
+  transform-style: preserve-3d;
+  transform: rotateX(25deg) rotateY(-30deg);
 }
-.face.top {
-  width: 140px; height: 180px;
-  background: linear-gradient(135deg, #065f46 0%, #047857 100%);
-  transform: rotateX(90deg) translateZ(10px) translateY(-90px);
-  box-shadow: inset 0 0 15px rgba(0,0,0,0.5);
+.world-floor {
+  position: absolute;
+  width: 260px;
+  height: 260px;
+  border-radius: 50%;
+  border: 1px dashed rgba(56, 189, 248, 0.2);
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.05) 0%, transparent 70%);
+  transform: rotateX(90deg) translateZ(-65px);
+  pointer-events: none;
+}
+.world-floor::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 0; right: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.world-floor::before {
+  content: '';
+  position: absolute;
+  left: 50%; top: 0; bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.prism {
+  width: 150px;
+  height: 14px;
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.08s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.p-face {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 2px;
+}
+.p-face.top {
+  width: 150px;
+  height: 100px;
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.98) 100%);
+  border: 1.5px solid rgba(56, 189, 248, 0.7);
+  box-shadow: inset 0 0 15px rgba(56, 189, 248, 0.15), 0 0 20px rgba(0, 0, 0, 0.6);
+  transform: rotateX(90deg) translateZ(7px) translateY(-50px);
   display: flex;
   flex-direction: column;
-  justify-content: space-around;
-  padding: 10px;
+  justify-content: space-between;
+  padding: 8px 12px;
+  color: #e2e8f0;
 }
-.face.bottom {
-  width: 140px; height: 180px;
-  background: #064e3b;
-  transform: rotateX(-90deg) translateZ(10px) translateY(90px);
+.p-face.bottom {
+  width: 150px;
+  height: 100px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  transform: rotateX(-90deg) translateZ(7px) translateY(50px);
 }
-.face.front {
-  width: 140px; height: 20px;
-  background: #022c22;
-  transform: translateZ(90px);
+.p-face.front {
+  width: 150px;
+  height: 14px;
+  background: rgba(239, 68, 68, 0.25);
+  border: 1px solid #ef4444;
+  color: #fca5a5;
+  font-size: 0.6rem;
+  transform: translateZ(50px);
 }
-.face.back {
-  width: 140px; height: 20px;
-  background: #022c22;
-  transform: rotateY(180deg) translateZ(90px);
+.p-face.back {
+  width: 150px;
+  height: 14px;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  transform: rotateY(180deg) translateZ(50px);
 }
-.face.right {
-  width: 180px; height: 20px;
-  background: #047857;
-  transform: rotateY(90deg) translateZ(50px) translateX(-90px);
+.p-face.right {
+  width: 100px;
+  height: 14px;
+  background: rgba(34, 197, 94, 0.25);
+  border: 1px solid #22c55e;
+  color: #86efac;
+  font-size: 0.6rem;
+  transform: rotateY(90deg) translateZ(75px) translateX(-50px);
 }
-.face.left {
-  width: 180px; height: 20px;
-  background: #047857;
-  transform: rotateY(-90deg) translateZ(90px) translateX(-90px);
+.p-face.left {
+  width: 100px;
+  height: 14px;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  transform: rotateY(-90deg) translateZ(75px) translateX(-50px);
+}
+/* Body Frame RGB 3축 (Tripod) */
+.axis-beam {
+  position: absolute;
+  transform-style: preserve-3d;
+  pointer-events: none;
+}
+.axis-x {
+  width: 85px;
+  height: 3px;
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+  top: 50%; left: 50%;
+  transform-origin: left center;
+  transform: rotateY(90deg) translateZ(0);
+}
+.axis-x::after {
+  content: '+X (Roll)';
+  position: absolute;
+  right: -58px; top: -9px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #fca5a5;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid #ef4444;
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.axis-y {
+  width: 85px;
+  height: 3px;
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+  top: 50%; left: 50%;
+  transform-origin: left center;
+  transform: rotateY(0deg) translateZ(0);
+}
+.axis-y::after {
+  content: '+Y (Pitch)';
+  position: absolute;
+  right: -60px; top: -9px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #86efac;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid #22c55e;
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.axis-z {
+  width: 75px;
+  height: 3px;
+  background: #38bdf8;
+  box-shadow: 0 0 8px #38bdf8;
+  top: 50%; left: 50%;
+  transform-origin: left center;
+  transform: rotateZ(-90deg) translateZ(0);
+}
+.axis-z::after {
+  content: '+Z (Yaw)';
+  position: absolute;
+  right: -55px; top: -9px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #7dd3fc;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid #38bdf8;
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.origin-hub {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-radius: 50%;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 10px #fff;
+  z-index: 10;
 }
 .chip {
   background: #0f172a;
   border: 1px solid #94a3b8;
   color: #38bdf8;
-  padding: 3px 6px;
+  padding: 2px 5px;
   border-radius: 3px;
-  font-size: 0.65rem;
+  font-size: 0.6rem;
 }
 .axes {
   display: flex;
   gap: 8px;
   font-size: 0.65rem;
 }
-.axis-x { color: #f87171; }
-.axis-y { color: #4ade80; }
-.axis-z { color: #60a5fa; }
+.axis-x-tag { color: #f87171; font-weight: 700; }
+.axis-y-tag { color: #4ade80; font-weight: 700; }
+.axis-z-tag { color: #38bdf8; font-weight: 700; }
 
 /* Attitude Angles */
 .stat-row {
@@ -713,24 +847,36 @@ h1 span { color: var(--accent); }
   <!-- 3D Attitude Visualizer -->
   <div class="card">
     <div class="card-title">
-      <span>3D 보드 자세 동기화 (GPU 가속)</span>
-      <span class="axes"><span class="axis-x">X(Roll)</span> <span class="axis-y">Y(Pitch)</span> <span class="axis-z">Z(Yaw)</span></span>
+      <span>3D Body Frame 자세 동기화 (GPU 가속)</span>
+      <span class="axes"><span class="axis-x-tag">+X (Roll)</span> <span class="axis-y-tag">+Y (Pitch)</span> <span class="axis-z-tag">+Z (Yaw)</span></span>
     </div>
     <div class="scene3d">
-      <div class="cube" id="board">
-        <div class="face front">NUCLEO-H743ZI2</div>
-        <div class="face back">ST-LINK / V3E</div>
-        <div class="face top">
-          <div style="font-size:0.6rem;color:#cbd5e1">STM32H743ZI 480MHz</div>
-          <div style="display:flex;justify-content:center;gap:6px">
-            <span class="chip">LSM6DSO</span>
-            <span class="chip">LIS2MDL</span>
+      <div class="camera-rig">
+        <div class="world-floor"></div>
+        <div class="prism" id="board">
+          <div class="p-face front">FRONT (+X)</div>
+          <div class="p-face back">BACK</div>
+          <div class="p-face top">
+            <div style="font-size:0.6rem;color:#cbd5e1;display:flex;justify-content:space-between">
+              <span>NUCLEO-H743ZI2</span>
+              <span>480MHz</span>
+            </div>
+            <div style="display:flex;justify-content:center;gap:6px;margin:2px 0">
+              <span class="chip">LSM6DSO</span>
+              <span class="chip">LIS2MDL</span>
+            </div>
+            <div style="font-size:0.55rem;color:#94a3b8;text-align:center">BODY FRAME (X-FWD, Y-RIGHT, Z-UP)</div>
           </div>
-          <div style="font-size:0.55rem;color:#94a3b8">X-NUCLEO-IKS01A3</div>
+          <div class="p-face bottom"></div>
+          <div class="p-face left">LEFT (-Y)</div>
+          <div class="p-face right">RIGHT (+Y)</div>
+
+          <!-- Body Frame RGB 3축 (Tripod) -->
+          <div class="origin-hub"></div>
+          <div class="axis-beam axis-x"></div>
+          <div class="axis-beam axis-y"></div>
+          <div class="axis-beam axis-z"></div>
         </div>
-        <div class="face bottom"></div>
-        <div class="face left">RJ45 ETH</div>
-        <div class="face right">IKS01A3</div>
       </div>
     </div>
     <div class="stat-row">
@@ -777,6 +923,17 @@ const matEl = document.getElementById('rot-mat');
 const statusEl = document.getElementById('status');
 const modeEl = document.getElementById('motion-mode');
 
+let curR = 0, curP = 0, curY = 0;
+let hasInitAngles = false;
+
+// 오일러 각 +-180도 경계 래핑 시 CSS 360도 반대 회전 플립(휙 도는 현상) 완전 방지
+function unwrapAngle(target, current) {
+  let diff = (target - current) % 360;
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
+  return current + diff;
+}
+
 async function updateTele() {
   try {
     const res = await fetch('/api/ahrs');
@@ -802,8 +959,17 @@ async function updateTele() {
     pitchEl.textContent = p.toFixed(1);
     yawEl.textContent = y.toFixed(1);
 
-    // 3D 보드 모델 회전 동기화 (Roll: rotateX, Pitch: rotateZ, Yaw: rotateY)
-    board.style.transform = `rotateX(${-p}deg) rotateZ(${-r}deg) rotateY(${y}deg)`;
+    if (!hasInitAngles) {
+      curR = r; curP = p; curY = y;
+      hasInitAngles = true;
+    } else {
+      curR = unwrapAngle(r, curR);
+      curP = unwrapAngle(p, curP);
+      curY = unwrapAngle(y, curY);
+    }
+
+    // 3D 보드 모델 회전 동기화 (연속 언래핑 각도 적용으로 특이점 플립 제로화)
+    board.style.transform = `rotateX(${-curP}deg) rotateZ(${-curR}deg) rotateY(${curY}deg)`;
 
     quatEl.textContent = `${d.quat.w.toFixed(3)}, ${d.quat.x.toFixed(3)}, ${d.quat.y.toFixed(3)}, ${d.quat.z.toFixed(3)}`;
     biasEl.textContent = `${d.bias_dps.bx.toFixed(2)}, ${d.bias_dps.by.toFixed(2)}, ${d.bias_dps.bz.toFixed(2)}`;
