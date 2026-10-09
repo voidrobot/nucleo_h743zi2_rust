@@ -89,8 +89,13 @@ nucleo_h743zi2_rust/
 │       ├── Cargo.toml
 │       └── src/lib.rs            # 온보드 핀 매핑(LED/버튼) 및 BoardLeds 구조체
 ├── examples/                     # 단계별 독립 예제 크레이트 모음
-│   └── 01_blinky/                # [Step 0] 온보드 3색 LED 순차 점멸 예제
+│   ├── 01_blinky/                # [Step 0] 온보드 3색 LED 순차 점멸 예제
+│   │   ├── Cargo.toml
+│   │   ├── README.md             # 예제 상세 기술 분석서
+│   │   └── src/main.rs
+│   └── 02_sensor_all_sampling/   # [Step 1] IKS01A3 6종 센서 이종 주기 비동기 샘플링 예제
 │       ├── Cargo.toml
+│       ├── README.md             # 예제 상세 기술 분석서
 │       └── src/main.rs
 ├── README.md                     # 본 프로젝트 기술 명세서
 ├── AGENTS.md                     # 에이전트 거버넌스 규칙
@@ -112,6 +117,9 @@ nucleo_h743zi2_rust/
 
 ### ② 예제 빌드 및 실행
 ```bash
-# blinky_01 예제 빌드 및 타깃 MCU에 즉시 플래시/실행 (RTT 로깅 포함)
+# 01_blinky: 기본 온보드 LED 순차 점멸 예제
 cargo run -p blinky_01
+
+# 02_sensor_all_sampling: IKS01A3 6종 센서 이종 주기(100Hz, 10Hz, 1Hz) 비동기 샘플링 예제
+cargo run -p sensor_all_sampling_02
 ```

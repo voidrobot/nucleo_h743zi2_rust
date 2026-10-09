@@ -1,0 +1,18 @@
+[package]
+name = "sensor_all_sampling_02"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Multi-rate asynchronous sampling for all X-NUCLEO-IKS01A3 sensors"
+
+[dependencies]
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+nucleo-bsp.workspace = true
+embassy-executor.workspace = true
+embassy-stm32.workspace = true
+embassy-time.workspace = true
+embassy-sync.workspace = true
+embedded-hal-async.workspace = true
+defmt.workspace = true
