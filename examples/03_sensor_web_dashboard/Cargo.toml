@@ -1,0 +1,21 @@
+[package]
+name = "sensor_web_dashboard_03"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Embedded HTTP Web Server and Live Dashboard for X-NUCLEO-IKS01A3 Sensors via DHCP Ethernet"
+
+[dependencies]
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+nucleo-bsp.workspace = true
+embassy-executor.workspace = true
+embassy-stm32.workspace = true
+embassy-time.workspace = true
+embassy-sync.workspace = true
+embassy-net.workspace = true
+embedded-io-async.workspace = true
+embedded-hal-async.workspace = true
+heapless.workspace = true
+defmt.workspace = true
