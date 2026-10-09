@@ -2,8 +2,8 @@
 title: "NUCLEO-H743ZI2 Embassy 온보드 LED 순차 점멸 예제 (01_blinky)"
 source: "examples/01_blinky"
 created: "2026-10-09 19:00:20"
-modified: "2026-10-09 19:12:04"
-description: "NUCLEO-H743ZI2 온보드 3색 LED 순차 점멸 예제 및 RTT/defmt의 C/C++ 대비 아키텍처적 차별점 심층 분석서"
+modified: "2026-10-09 19:24:56"
+description: "NUCLEO-H743ZI2 온보드 3색 LED 순차 점멸 예제 및 RTT/defmt, Embassy 비동기 프레임워크 아키텍처 심층 분석서"
 tags:
   - "embedded-rust"
   - "embassy"
@@ -11,6 +11,7 @@ tags:
   - "blinky"
   - "defmt-rtt"
   - "rtt-deep-dive"
+  - "embassy-deep-dive"
   - "nucleo-bsp"
 ---
 
@@ -143,7 +144,54 @@ RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)�
 
 ---
 
-## 5. 엔지니어링 트레이드오프 및 인사이트 (Trade-offs & Insights)
+## 5. 심층 분석: 임베디드 비동기 프레임워크 Embassy의 설계 철학 (Deep Dive: Embassy Framework)
+
+### ① 등장 배경: 임베디드 동시성 모델의 양대 딜레마
+전통적 C/C++ 임베디드 소프트웨어 개발에서는 복수의 센서와 통신 주변장치를 동시에 제어하기 위해 두 가지 방식 중 하나를 선택해야만 했다:
+1. **베어메탈 슈퍼루프 (Superloop & State Machine)**:
+   - `while(1)` 루프 안에서 비차단 방식으로 상태 머신을 손수 작성.
+   - 단점: 코드 복잡도가 지수적으로 증가하고, 단 하나의 함수라도 블로킹 지연(`delay_ms`)을 일으키면 전체 시스템의 주기가 붕괴함.
+2. **전통적 선점형 RTOS (FreeRTOS, ThreadX 등)**:
+   - 태스크마다 독립된 스레드를 띄우고 선점형 스케줄링 수행.
+   - 단점: **태스크마다 독립된 개별 스택(최소 1~2 KB 이상)을 사전 할당**해야 하므로, RAM이 귀한 MCU에서 수십 KB의 메모리가 스택으로 낭비됨. 또한 스택 크기 예측 실패 시 알 수 없는 **스택 오버플로우(Stack Overflow)**로 인한 시스템 크래시 불안이 상존함.
+
+### ② Embassy의 혁신: 스택리스 코루틴 (Stackless Coroutine)
+Embassy는 Rust 언어 고유의 `async/await` 컴파일러 기능을 바탕으로 위 딜레마를 완전히 해소한다:
+- **단일 스택 공유 (Single Main Stack)**:
+  - Rust의 `async fn`은 컴파일 시점에 컴파일러에 의해 **초소형 유한상태머신(FSM) 구조체**로 자동 변환된다.
+  - 모든 비동기 태스크는 별도의 전용 스택 공간을 할당받지 않고, **단 1개의 메인 스택을 공유**하며 실행된다.
+  - 10개, 20개의 태스크를 동시에 스폰(Spawn)하더라도 태스크당 소비되는 RAM은 **불과 수십 바이트 수준(상태 변수 저장 공간)**에 불과하여 메모리 효율이 극대화된다.
+- **문맥 전환 오버헤드 최소화**:
+  - RTOS처럼 CPU 레지스터 수십 개를 RAM 스택에 푸시/팝하는 무거운 하드웨어 문맥 전환 대신, 단지 상태 머신의 열거형(Enum) 상태 값 하나를 바꾸고 리턴하는 가벼운 함수 호출 수준으로 전환된다.
+
+### ③ 하드웨어 인터럽트와 `await`의 1:1 직결 및 자동 저전력
+Embassy에서는 주변장치 대기 코드가 선형적이면서도 완벽한 비차단(Non-blocking) 및 저전력으로 동작한다:
+
+```rust
+// Embassy 비동기 I/O 대기 개념
+let p = embassy_stm32::init(Default::default());
+Timer::after_millis(300).await; // 300ms 동안 타이머 만료 대기
+```
+
+- **실행 내부 동작**:
+  1. `await`가 호출되는 순간, 해당 태스크는 실행 권한을 `embassy-executor` 스케줄러에 반납하고 대기 큐로 들어간다.
+  2. 실행할 다른 준비된 태스크가 없으면, 스케줄러는 Cortex-M7 코어를 즉시 **`WFI` (Wait For Interrupt) / `WFE` (Wait For Event) 초저전력 슬립 모드**로 진입시킨다.
+  3. 지정된 하드웨어 타이머 또는 통신 DMA 인터럽트가 발생하는 순간, 칩이 깨어나면서 Rust의 **Waker** 메커니즘을 통해 대기 중이던 태스크만 정확히 `await` 다음 줄부터 즉시 실행을 재개한다.
+- 개발자가 복잡한 인터럽트 서비스 루틴(ISR)과 콜백 함수, 글로벌 플래그 변수를 직접 다루지 않고도 **동기식 코드처럼 읽히는 안전한 비동기 코드**를 완성할 수 있다.
+
+### ④ `embassy_*` 모듈 생태계 구성
+
+| 크레이트 명칭 | 주요 역할 및 기능 | C/C++ 임베디드 대응 개념 |
+| :--- | :--- | :--- |
+| **`embassy-executor`** | 비동기 태스크 스케줄링 및 Waker 기반 실행 런타임 | RTOS 커널 스케줄러 |
+| **`embassy-time`** | 마이크로초/밀리초 단위 비동기 지연 타이머 및 타임스탬프 | `vTaskDelay` / 소프트웨어 타이머 |
+| **`embassy-stm32`** | STM32 전 제품군 전용 공식 HAL (GPIO, I2C, SPI, DMA, EXTI 비동기 제어) | STM32Cube HAL |
+| **`embassy-sync`** | 태스크 간 무복사 데이터 통신 프리미티브 (`Channel`, `Mutex`, `Signal`) | FreeRTOS Queue / Semaphore |
+| **`embassy-net`** | 하드웨어 이더넷 및 Wi-Fi 제어를 위한 순수 Rust no_std 네트워크 스택 | LwIP 스택 |
+
+---
+
+## 6. 엔지니어링 트레이드오프 및 인사이트 (Trade-offs & Insights)
 
 ### ① 장점 (Pros)
 - **보드 브링업의 결정론적 검증**: LED 3색이 정확히 녹색 → 노란색 → 빨간색 순으로 회전하는 시각적 피드백을 통해 칩의 정상 클럭 공급 여부를 즉시 판별할 수 있다.
@@ -155,7 +203,7 @@ RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)�
 
 ---
 
-## 6. 실행 및 검증 방법 (Run & Verification)
+## 7. 실행 및 검증 방법 (Run & Verification)
 
 ### ① 실행 명령어
 NUCLEO-H743ZI2 보드가 USB로 연결된 상태에서 워크스페이스 최상위 루트에서 아래 명령을 실행한다:
@@ -177,7 +225,7 @@ cargo run -p blinky_01
 
 ---
 
-## 7. 관련 문서 및 소스코드 참조 (References)
+## 8. 관련 문서 및 소스코드 참조 (References)
 - [예제 메인 소스코드](src/main.rs): `01_blinky` 비동기 점멸 구현체
 - [예제 패키지 설정](Cargo.toml): `blinky_01` 크레이트 의존성 정의
 - [BSP 라이브러리](../../crates/nucleo-bsp/src/lib.rs): 온보드 핀아웃 및 `BoardLeds` 구조체
