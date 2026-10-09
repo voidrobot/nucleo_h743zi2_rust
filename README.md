@@ -84,10 +84,13 @@ nucleo_h743zi2_rust/
 ├── .cargo/
 │   └── config.toml               # 빌드 타깃(thumbv7em-none-eabihf) 및 러너(probe-rs) 설정
 ├── Cargo.toml                    # Cargo Workspace 선언 및 공통 의존성 관리
-├── crates/                       # 공통 하드웨어 추상화 계층
-│   └── nucleo-bsp/               # NUCLEO-H743ZI2 및 X-NUCLEO-IKS01A3 보드 지원 패키지
+├── crates/                       # 공통 하드웨어 추상화 계층 및 수학 모듈
+│   ├── nucleo-bsp/               # NUCLEO-H743ZI2 및 X-NUCLEO-IKS01A3 보드 지원 패키지
+│   │   ├── Cargo.toml
+│   │   └── src/lib.rs            # 온보드 핀 매핑(LED/버튼) 및 BoardLeds 구조체
+│   └── so3-inekf/                # 리 군(Lie Group) SO(3) 다양체 및 우불변 InEKF 수학 코어
 │       ├── Cargo.toml
-│       └── src/lib.rs            # 온보드 핀 매핑(LED/버튼) 및 BoardLeds 구조체
+│       └── src/                  # Rodrigues Exp/Log 사상, Hat/Vee 연산자, 6D InEKF
 ├── examples/                     # 단계별 독립 예제 크레이트 모음
 │   ├── 01_blinky/                # [Step 0] 온보드 3색 LED 순차 점멸 예제
 │   │   ├── Cargo.toml
@@ -97,7 +100,11 @@ nucleo_h743zi2_rust/
 │   │   ├── Cargo.toml
 │   │   ├── README.md             # 예제 상세 기술 분석서
 │   │   └── src/main.rs
-│   └── 03_sensor_web_dashboard/  # [Step 2] LAN8742A RMII 이더넷(DHCP) 및 내장 웹 대시보드 예제
+│   ├── 03_sensor_web_dashboard/  # [Step 2] LAN8742A RMII 이더넷(DHCP) 및 내장 웹 대시보드 예제
+│   │   ├── Cargo.toml
+│   │   ├── README.md             # 예제 상세 기술 분석서
+│   │   └── src/main.rs
+│   └── 04_ahrs_so3_inekf/        # [Step 3] SO(3) Right-Invariant InEKF AHRS 및 3D 웹 대시보드 예제
 │       ├── Cargo.toml
 │       ├── README.md             # 예제 상세 기술 분석서
 │       └── src/main.rs
@@ -113,7 +120,7 @@ nucleo_h743zi2_rust/
 
 ### ① 하드웨어 연결 확인
 1. NUCLEO-H743ZI2 보드의 ST Zio 커넥터에 X-NUCLEO-IKS01A3 쉴드를 적층 장착한다.
-2. 유선 네트워크 실시간 모니터링 예제(`03_sensor_web_dashboard`) 구동 시, 온보드 RJ45 이더넷 포트에 LAN 케이블을 공유기/스위치와 연결한다.
+2. 유선 네트워크 실시간 모니터링 예제(`03`, `04`) 구동 시, 온보드 RJ45 이더넷 포트에 LAN 케이블을 공유기/스위치와 연결한다.
 3. NUCLEO-H743ZI2의 USB ST-LINK 커넥터(CN1)를 PC에 연결한다.
 4. 호스트에서 ST-LINK/V3E 장치 인식을 확인한다:
    ```bash
@@ -130,9 +137,12 @@ cargo run -p sensor_all_sampling_02
 
 # 03_sensor_web_dashboard: LAN8742A 유선 이더넷(DHCP) 및 내장 웹 대시보드 모니터링 예제
 cargo run -p sensor_web_dashboard_03
+
+# 04_ahrs_so3_inekf: SO(3) 우불변 InEKF 자세 추정 및 GPU 가속 3D 웹 대시보드 예제
+cargo run -p ahrs_so3_inekf_04
 ```
 
-> **웹 대시보드 접속 안내**:
-> `sensor_web_dashboard_03` 실행 시 DHCP 서버로부터 IP(예: `192.168.50.92`)를 자동 할당받는다.
-> - **웹 대시보드 GUI**: 웹 브라우저에서 `http://<할당된_IP>/` 접속 (다크 글래스모피즘 UI)
-> - **REST API**: `curl -s http://<할당된_IP>/api/sensors` (JSON 센서 원시 데이터)
+> **3D 웹 대시보드 접속 안내 (04_ahrs_so3_inekf)**:
+> `ahrs_so3_inekf_04` 실행 시 DHCP 서버로부터 IP(예: `192.168.50.93`)를 자동 할당받는다.
+> - **3D 대시보드 GUI**: 웹 브라우저에서 `http://<할당된_IP>/` 접속 (실시간 3D 보드 모델 물리 회전 동기화)
+> - **REST API**: `curl -s http://<할당된_IP>/api/ahrs` (쿼터니언, 오일러 각, 바이어스, 회전 행렬 JSON)

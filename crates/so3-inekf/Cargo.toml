@@ -1,0 +1,12 @@
+[package]
+name = "so3-inekf"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Embedded SO(3) Lie Group and Right-Invariant InEKF Engine"
+
+[dependencies]
+libm = "0.2"
+
+[dev-dependencies]

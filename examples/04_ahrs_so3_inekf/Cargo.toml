@@ -1,0 +1,23 @@
+[package]
+name = "ahrs_so3_inekf_04"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SO(3) Right-Invariant InEKF AHRS with 3D Live Web Dashboard on NUCLEO-H743ZI2"
+
+[dependencies]
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+nucleo-bsp.workspace = true
+so3-inekf = { path = "../../crates/so3-inekf" }
+embassy-executor.workspace = true
+embassy-stm32.workspace = true
+embassy-time.workspace = true
+embassy-sync.workspace = true
+embassy-net.workspace = true
+embedded-io-async.workspace = true
+embedded-hal-async.workspace = true
+heapless.workspace = true
+defmt.workspace = true
+libm = "0.2"
