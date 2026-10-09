@@ -10,3 +10,5 @@ description = "Embedded SO(3) Lie Group and Right-Invariant InEKF Engine"
 libm = "0.2"
 
 [dev-dependencies]
+nalgebra = "0.33"
+rand = "0.8"

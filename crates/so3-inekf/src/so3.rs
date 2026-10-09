@@ -203,6 +203,30 @@ impl So3 {
         }
     }
 
+    /// 단위 쿼터니언으로부터 회전 행렬 생성: q = [qw, qx, qy, qz]
+    pub fn from_quaternion(q: [f32; 4]) -> Self {
+        let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
+        Self {
+            data: [
+                [
+                    1.0 - 2.0 * (y * y + z * z),
+                    2.0 * (x * y - w * z),
+                    2.0 * (x * z + w * y),
+                ],
+                [
+                    2.0 * (x * y + w * z),
+                    1.0 - 2.0 * (x * x + z * z),
+                    2.0 * (y * z - w * x),
+                ],
+                [
+                    2.0 * (x * z - w * y),
+                    2.0 * (y * z + w * x),
+                    1.0 - 2.0 * (x * x + y * y),
+                ],
+            ],
+        }
+    }
+
     /// ZYX 오일러 각 변환: (Roll, Pitch, Yaw) in Degrees
     pub fn to_euler_deg(&self) -> (f32, f32, f32) {
         let r = &self.data;
