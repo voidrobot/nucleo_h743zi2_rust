@@ -2,7 +2,7 @@
 title: "NUCLEO-H743ZI2 Embassy 온보드 LED 순차 점멸 예제 (01_blinky)"
 source: "examples/01_blinky"
 created: "2026-10-09 19:00:20"
-modified: "2026-10-09 19:24:56"
+modified: "2026-10-09 19:28:10"
 description: "NUCLEO-H743ZI2 온보드 3색 LED 순차 점멸 예제 및 RTT/defmt, Embassy 비동기 프레임워크 아키텍처 심층 분석서"
 tags:
   - "embedded-rust"
@@ -188,6 +188,45 @@ Timer::after_millis(300).await; // 300ms 동안 타이머 만료 대기
 | **`embassy-stm32`** | STM32 전 제품군 전용 공식 HAL (GPIO, I2C, SPI, DMA, EXTI 비동기 제어) | STM32Cube HAL |
 | **`embassy-sync`** | 태스크 간 무복사 데이터 통신 프리미티브 (`Channel`, `Mutex`, `Signal`) | FreeRTOS Queue / Semaphore |
 | **`embassy-net`** | 하드웨어 이더넷 및 Wi-Fi 제어를 위한 순수 Rust no_std 네트워크 스택 | LwIP 스택 |
+
+### ⑤ 스케줄링 정책과 실시간성: 협력적 스케줄링 vs 하드웨어 선점 (Scheduling & Preemption)
+
+전통적 선점형 RTOS(FreeRTOS 등)의 관점에서 볼 때, Embassy의 스케줄링 및 실시간성(Real-Time) 정책은 **"소프트웨어 태스크 레벨의 협력적 스케줄링"**과 **"하드웨어 레벨의 강제 선점"**이 결합된 하이브리드 구조를 갖는다:
+
+```mermaid
+graph TD
+    subgraph HW_NVIC ["STM32H7 하드웨어 NVIC (우선순위 기반 물리적 선점)"]
+        direction TB
+        HighPri["Priority 1: InterruptExecutor (고우선순위 비동기 태스크 / 제어 루프)"]
+        LowPri["Priority 0: Main Thread Executor (일반 비동기 태스크 / 로깅 / 통신)"]
+        
+        HighPri -->|"하드웨어 인터럽트 레벨에서<br/>즉시 강제 선점 (Preempt)!"| LowPri
+    end
+```
+
+#### 1. 기본 태스크 정책: `.await` 기반 협력적(Cooperative) 스케줄링
+- **시분할 선점 배제**: SysTick 타이머 틱마다 실행 중인 태스크를 임의의 지점에서 강제로 중단시키는 무차별 선점을 하지 않는다.
+- **자발적 양보(Yield)**: 태스크는 오직 자신이 **`.await`를 호출한 지점에서만** 실행권을 스케줄러에 반납한다.
+- **원자성(Atomicity) 확보와 락 오버헤드 소멸**: `.await`가 없는 연속된 연산 블록은 다른 비동기 태스크가 중간에 끼어들 수 없는 **자연스러운 원자적 실행 구간**이 된다. 따라서 전통적 RTOS에서 공유 변수 하나를 수정할 때마다 Mutex 락을 걸고 푸느라 낭비되던 오버헤드와 우선순위 역전(Priority Inversion) 문제가 근본적으로 제거된다.
+
+#### 2. 하드 리얼타임(Hard Real-Time) 보장: 하드웨어 NVIC 다이렉트 선점
+- 일반 태스크가 `.await` 없이 무거운 연산을 처리하고 있더라도, STM32H743의 하드웨어 인터럽트 컨트롤러(NVIC)는 **그 즉시 해당 태스크를 물리적으로 선점(Preempt)**하여 10 나노초 이내에 인터럽트 핸들러를 실행한다. 긴급 하드웨어 제어는 언제나 하드웨어가 직접 선점한다.
+
+#### 3. 비동기 태스크 간 강제 선점: 다중 우선순위 실행기 (`InterruptExecutor`)
+- "비동기(`async`) 태스크 중에서도 특정 제어 루프는 1 kHz로 일반 태스크를 뚫고 강제 선점해야 하는 경우", Embassy는 **`InterruptExecutor`**를 제공한다.
+- STM32H7의 여유 소프트웨어 인터럽트 라인(SWI 등)에 고우선순위 비동기 실행기를 바인딩한다.
+- 이 경우, 하위 우선순위 태스크(예: RTT 로깅)가 `.await`를 부르지 않고 돌고 있더라도, **하드웨어 인터럽트 신호가 트리거되면서 상위 비동기 태스크(예: IMU 필터)가 하위 태스크를 물리적으로 선점**하여 실행된다.
+
+#### 4. FreeRTOS 선점형 모델 vs Embassy 모델 종합 비교
+
+| 비교 항목 | FreeRTOS (전통적 선점형 RTOS) | Embassy (현대적 비동기 프레임워크) |
+| :--- | :--- | :--- |
+| **선점 주체** | OS 커널 소프트웨어 틱 (SysTick 1ms 주기) | **ARM Cortex-M NVIC (하드웨어 레벨 직결)** |
+| **태스크 간 선점** | **강제 선점** (코드의 임의 지점에서 컨텍스트 스위칭) | **협력적 (`.await` 지점)** + **우선순위별 하드웨어 선점** |
+| **데이터 레이스 위험** | 매우 높음 (모든 공유 변수에 Mutex 필수) | 극소화 (`.await` 사이 구간은 자연 원자성 보장) |
+| **문맥 전환 비용** | 수 µs (레지스터 16~32개 스택 푸시/팝) | **수십 ns** (단순 FSM 상태 변수 값 변경) |
+| **스택 메모리 소모** | 태스크마다 1~2 KB 분할 (스택 오버플로우 위험) | **단일 스택 공유** (태스크당 수십 Byte) |
+| **실시간 지터(Jitter)** | 커널 스케줄러 틱에 의한 지터 존재 | **지터 없는 하드웨어 NVIC 다이렉트 처리** |
 
 ---
 
