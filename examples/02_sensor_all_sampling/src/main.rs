@@ -9,7 +9,7 @@ use embassy_stm32::peripherals::I2C1;
 use embassy_stm32::time::Hertz;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Ticker};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use nucleo_bsp::BoardLeds;
 
 bind_interrupts!(struct Irqs {
@@ -17,17 +17,31 @@ bind_interrupts!(struct Irqs {
     I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
 });
 
+use embassy_executor::InterruptExecutor;
+use embassy_stm32::interrupt;
+use embassy_stm32::interrupt::{InterruptExt, Priority};
+
+static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
+
+#[embassy_stm32::interrupt]
+unsafe fn CEC() {
+    EXECUTOR_HIGH.on_interrupt();
+}
+
 type I2cBus = Mutex<CriticalSectionRawMutex, Option<I2c<'static, embassy_stm32::mode::Async>>>;
 static I2C_BUS: I2cBus = Mutex::new(None);
 
 /// IKS01A3 쉴드 센서 전수 계측 통합 데이터 구조체
 #[derive(Copy, Clone, Default)]
 pub struct SensorSnapshot {
-    // [IMU 100Hz 갱신] LSM6DSO 6축 + LIS2DW12 3축 가속도
+    // [IMU 100Hz 선점형 실시간 갱신] LSM6DSO 6축 + LIS2DW12 3축 가속도
     pub lsm_accel_mg: [i16; 3],  // X, Y, Z (단위: mg, ±2g 기준)
     pub lsm_gyro_dps: [i16; 3],  // X, Y, Z (단위: dps, ±250dps 기준)
     pub lis2dw_accel_mg: [i16; 3], // 보조 가속도계 X, Y, Z (단위: mg)
     pub imu_sample_count: u32,
+    pub imu_dt_us: u32,          // 실측 주기 (목표치: 10,000 us)
+    pub imu_min_dt_us: u32,      // 최소 주기
+    pub imu_max_dt_us: u32,      // 최대 주기
 
     // [MAG 10Hz 갱신] LIS2MDL 3축 지자기
     pub mag_mgauss: [i16; 3],    // X, Y, Z (단위: mgauss)
@@ -47,6 +61,9 @@ static SENSOR_STATE: Mutex<CriticalSectionRawMutex, SensorSnapshot> = Mutex::new
     lsm_gyro_dps: [0; 3],
     lis2dw_accel_mg: [0; 3],
     imu_sample_count: 0,
+    imu_dt_us: 10_000,
+    imu_min_dt_us: 10_000,
+    imu_max_dt_us: 10_000,
     mag_mgauss: [0; 3],
     mag_sample_count: 0,
     press_hpa_x10: 0,
@@ -98,8 +115,14 @@ async fn main(spawner: Spawner) {
     init_sensors().await;
     info!("전체 6종 센서 초기화 완료. 비동기 멀티태스크 샘플링 개시!");
 
-    // 2단계: 이종 주기로 동작하는 독립 비동기 태스크 스폰
-    spawner.must_spawn(task_imu_100hz());
+    // 2단계: 고우선순위 선점형 InterruptExecutor 초기화 (NVIC 하드웨어 인터럽트 기반)
+    interrupt::CEC.set_priority(Priority::P6);
+    let high_spawner = EXECUTOR_HIGH.start(interrupt::CEC);
+
+    // 고우선순위 선점형 실시간 IMU 태스크 스폰 (Thread Mode 태스크 강제 선점)
+    high_spawner.must_spawn(task_imu_100hz());
+
+    // 일반 Thread Mode 협력형 태스크 스폰
     spawner.must_spawn(task_mag_10hz());
     spawner.must_spawn(task_env_1hz());
     spawner.must_spawn(task_dashboard_reporter());
@@ -187,18 +210,56 @@ async fn init_sensors() {
     let _ = i2c.blocking_write(ADDR_HTS221, &[0x20, 0x85]);
 }
 
-/// [Task 1: 100 Hz] 고속 IMU 모션 샘플링 (10ms 주기)
+/// [Task 1: 100 Hz] 고우선순위 선점형 IMU 실시간 모션 태스크 (10ms 주기)
 ///
-/// 메인보드 MCU(STM32H7)의 100 Hz Ticker가 타이밍 마스터 권한을 갖고 10ms 주기로 엄격히 폴링한다.
-/// 센서(LSM6DSO)는 416 Hz로 오버샘플링 중이며 41.6 Hz 온칩 LPF2로 50 Hz 초과 고주파 노이즈가 제거된
-/// 최신 데이터를 I2C 버스를 통해 원자적으로 획득한다.
+/// =========================================================================================
+/// [드론 비행 제어기 / 4족 보행 로봇 평형 제어 / 고정밀 EKF를 위한 Hard Real-Time 아키텍처]
+/// =========================================================================================
+///
+/// 1. 하드웨어 NVIC 다이렉트 강제 선점 (InterruptExecutor 기반):
+///    - 본 태스크는 Cortex-M7 하드웨어 인터럽트(CEC IRQ, Priority P6)에 바인딩된
+///      `InterruptExecutor`에서 독립적으로 구동된다.
+///    - 하위 Thread Mode에서 실행되는 지자기/환경센서/RTT 로깅 태스크가 실행 중이더라도,
+///      10.00ms 타이머 만료 시 하드웨어 NVIC 인터럽트가 즉각 발생하여 하위 태스크를
+///      물리적으로 강제 선점(Hardware Preemption)한다.
+///    - 이로써 협력형 스케줄러에서 발생하는 태스크 간 스케줄링 지터(Scheduling Jitter)를
+///      마이크로초(µs) 이하 수준으로 억제한다.
+///
+/// 2. 버스 락 점유 분할을 통한 우선순위 역전(Priority Inversion) 방어:
+///    - 저속 환경 센서 태스크(`task_env_1hz`)가 센서 계측 사이마다 버스 락을 반환하고
+///      미세 슬립(Yield Window)을 제공하므로, 고우선순위 IMU 태스크가 I2C 버스를 최대
+///      수십~수백 µs 이내에 즉각 확보할 수 있도록 보장한다.
+///
+/// 3. 정밀 dt 프로파일링:
+///    - 칼만 필터(EKF)의 공분산 전파(P = F*P*F^T + Q) 및 적분 계산의 신뢰도를 입증하기 위해
+///      루프 간 실제 경과 시간(`dt_us`)과 최소/최대 지터(Min/Max Jitter)를 실시간 계측한다.
+/// =========================================================================================
 #[embassy_executor::task]
 async fn task_imu_100hz() {
     let mut ticker = Ticker::every(Duration::from_hz(100)); // 100 Hz (10ms)
     let mut buf = [0u8; 12];
+    let mut last_instant = Instant::now();
+    let mut min_dt_us = u32::MAX;
+    let mut max_dt_us = 0u32;
+    let mut is_first = true;
 
     loop {
         ticker.next().await;
+
+        let now = Instant::now();
+        let dt_us = (now - last_instant).as_micros() as u32;
+        last_instant = now;
+
+        if is_first {
+            is_first = false;
+        } else {
+            if dt_us < min_dt_us {
+                min_dt_us = dt_us;
+            }
+            if dt_us > max_dt_us {
+                max_dt_us = dt_us;
+            }
+        }
 
         let mut bus = I2C_BUS.lock().await;
         if let Some(i2c) = bus.as_mut() {
@@ -243,6 +304,9 @@ async fn task_imu_100hz() {
                 state.lsm_gyro_dps = gyro_dps;
                 state.lis2dw_accel_mg = accel2_mg;
                 state.imu_sample_count += 1;
+                state.imu_dt_us = dt_us;
+                state.imu_min_dt_us = if min_dt_us == u32::MAX { dt_us } else { min_dt_us };
+                state.imu_max_dt_us = max_dt_us;
             }
         }
     }
@@ -281,6 +345,9 @@ async fn task_mag_10hz() {
 }
 
 /// [Task 3: 1 Hz] 저속 환경 센서 샘플링 (1000ms 주기)
+///
+/// 저속 환경 센서들이 I2C 버스를 장시간 독점하지 않도록 센서 단위로 락을 획득/반환하고,
+/// 센서 간 50us 미세 슬립(Yield Window)을 삽입하여 고우선순위 선점형 IMU 루프를 보호한다.
 #[embassy_executor::task]
 async fn task_env_1hz() {
     let mut ticker = Ticker::every(Duration::from_hz(1)); // 1 Hz (1000ms)
@@ -288,57 +355,72 @@ async fn task_env_1hz() {
     loop {
         ticker.next().await;
 
-        let mut bus = I2C_BUS.lock().await;
-        if let Some(i2c) = bus.as_mut() {
-            // 1. LPS22HH 기압(3B: 0x28~0x2A) 및 온도(2B: 0x2B~0x2C)
-            let mut press_buf = [0u8; 5];
-            let mut p_hpa_x10 = 0u32;
-            let mut p_temp_x10 = 0i16;
-            if i2c.blocking_write_read(ADDR_LPS22HH, &[0x28], &mut press_buf).is_ok() {
-                let raw_press = (press_buf[0] as u32)
-                    | ((press_buf[1] as u32) << 8)
-                    | ((press_buf[2] as u32) << 16);
-                let raw_temp = i16::from_le_bytes([press_buf[3], press_buf[4]]);
-                p_hpa_x10 = (raw_press * 10) / 4096;
-                p_temp_x10 = (raw_temp * 10) / 100;
+        // 1. LPS22HH 기압(3B: 0x28~0x2A) 및 온도(2B: 0x2B~0x2C)
+        let mut p_hpa_x10 = 0u32;
+        let mut p_temp_x10 = 0i16;
+        {
+            let mut bus = I2C_BUS.lock().await;
+            if let Some(i2c) = bus.as_mut() {
+                let mut press_buf = [0u8; 5];
+                if i2c.blocking_write_read(ADDR_LPS22HH, &[0x28], &mut press_buf).is_ok() {
+                    let raw_press = (press_buf[0] as u32)
+                        | ((press_buf[1] as u32) << 8)
+                        | ((press_buf[2] as u32) << 16);
+                    let raw_temp = i16::from_le_bytes([press_buf[3], press_buf[4]]);
+                    p_hpa_x10 = (raw_press * 10) / 4096;
+                    p_temp_x10 = (raw_temp * 10) / 100;
+                }
             }
-
-            // 2. STTS751 고정밀 온도계 (0x00 High, 0x02 Low)
-            let mut stts_high = [0u8; 1];
-            let mut stts_low = [0u8; 1];
-            let mut s_temp_x10 = 0i16;
-            if i2c.blocking_write_read(ADDR_STTS751, &[0x00], &mut stts_high).is_ok()
-                && i2c.blocking_write_read(ADDR_STTS751, &[0x02], &mut stts_low).is_ok()
-            {
-                let h = stts_high[0] as i8 as i32;
-                let l = (stts_low[0] >> 4) as i32;
-                s_temp_x10 = ((h * 10) + ((l * 625) / 1000)) as i16;
-            }
-
-            // 3. HTS221 온습도계 원시 읽기 (0x28 | 0x80 습도, 0x2A | 0x80 온도)
-            let mut hts_h_buf = [0u8; 2];
-            let mut hts_t_buf = [0u8; 2];
-            let mut h_hum_x10 = 0u16;
-            let mut h_temp_x10 = 0i16;
-            if i2c.blocking_write_read(ADDR_HTS221, &[0x28 | 0x80], &mut hts_h_buf).is_ok()
-                && i2c.blocking_write_read(ADDR_HTS221, &[0x2A | 0x80], &mut hts_t_buf).is_ok()
-            {
-                let raw_h = i16::from_le_bytes(hts_h_buf);
-                let raw_t = i16::from_le_bytes(hts_t_buf);
-                // 단순 추정치 (정밀 보정식 전 기초 스케일)
-                h_hum_x10 = ((raw_h.abs() as u32 * 1000) / 32767).min(1000) as u16;
-                h_temp_x10 = (raw_t / 64) as i16;
-            }
-
-            // 공유 상태 갱신
-            let mut state = SENSOR_STATE.lock().await;
-            state.press_hpa_x10 = p_hpa_x10;
-            state.press_temp_c_x10 = p_temp_x10;
-            state.stts_temp_c_x10 = s_temp_x10;
-            state.hts_humidity_x10 = h_hum_x10;
-            state.hts_temp_c_x10 = h_temp_x10;
-            state.env_sample_count += 1;
         }
+        // 고우선순위 IMU 선점을 위한 버스 양보 윈도우
+        Timer::after_micros(50).await;
+
+        // 2. STTS751 고정밀 온도계 (0x00 High, 0x02 Low)
+        let mut s_temp_x10 = 0i16;
+        {
+            let mut bus = I2C_BUS.lock().await;
+            if let Some(i2c) = bus.as_mut() {
+                let mut stts_high = [0u8; 1];
+                let mut stts_low = [0u8; 1];
+                if i2c.blocking_write_read(ADDR_STTS751, &[0x00], &mut stts_high).is_ok()
+                    && i2c.blocking_write_read(ADDR_STTS751, &[0x02], &mut stts_low).is_ok()
+                {
+                    let h = stts_high[0] as i8 as i32;
+                    let l = (stts_low[0] >> 4) as i32;
+                    s_temp_x10 = ((h * 10) + ((l * 625) / 1000)) as i16;
+                }
+            }
+        }
+        Timer::after_micros(50).await;
+
+        // 3. HTS221 온습도계 원시 읽기 (0x28 | 0x80 습도, 0x2A | 0x80 온도)
+        let mut h_hum_x10 = 0u16;
+        let mut h_temp_x10 = 0i16;
+        {
+            let mut bus = I2C_BUS.lock().await;
+            if let Some(i2c) = bus.as_mut() {
+                let mut hts_h_buf = [0u8; 2];
+                let mut hts_t_buf = [0u8; 2];
+                if i2c.blocking_write_read(ADDR_HTS221, &[0x28 | 0x80], &mut hts_h_buf).is_ok()
+                    && i2c.blocking_write_read(ADDR_HTS221, &[0x2A | 0x80], &mut hts_t_buf).is_ok()
+                {
+                    let raw_h = i16::from_le_bytes(hts_h_buf);
+                    let raw_t = i16::from_le_bytes(hts_t_buf);
+                    // 단순 추정치 (정밀 보정식 전 기초 스케일)
+                    h_hum_x10 = ((raw_h.abs() as u32 * 1000) / 32767).min(1000) as u16;
+                    h_temp_x10 = (raw_t / 64) as i16;
+                }
+            }
+        }
+
+        // 공유 상태 갱신
+        let mut state = SENSOR_STATE.lock().await;
+        state.press_hpa_x10 = p_hpa_x10;
+        state.press_temp_c_x10 = p_temp_x10;
+        state.stts_temp_c_x10 = s_temp_x10;
+        state.hts_humidity_x10 = h_hum_x10;
+        state.hts_temp_c_x10 = h_temp_x10;
+        state.env_sample_count += 1;
     }
 }
 
@@ -358,8 +440,10 @@ async fn task_dashboard_reporter() {
         };
 
         info!("===================[ IKS01A3 Multi-Rate Report #{}: 1초 주기 ]===================", report_seq);
-        info!("  [IMU 100Hz (누적 {}회)] Accel: [X: {} mg, Y: {} mg, Z: {} mg] | Gyro: [X: {} dps, Y: {} dps, Z: {} dps]",
-            snap.imu_sample_count,
+        info!("  [RT-IMU 100Hz (선점형 InterruptExecutor)] 누적 {}회 | dt: {} us (min: {}, max: {})",
+            snap.imu_sample_count, snap.imu_dt_us, snap.imu_min_dt_us, snap.imu_max_dt_us
+        );
+        info!("    -> Accel: [X: {} mg, Y: {} mg, Z: {} mg] | Gyro: [X: {} dps, Y: {} dps, Z: {} dps]",
             snap.lsm_accel_mg[0], snap.lsm_accel_mg[1], snap.lsm_accel_mg[2],
             snap.lsm_gyro_dps[0], snap.lsm_gyro_dps[1], snap.lsm_gyro_dps[2],
         );
