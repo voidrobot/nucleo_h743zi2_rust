@@ -59,17 +59,33 @@ pub struct RightInvariantInEKF {
     pub g_ref: [f32; 3],
     /// 기준 지구 자기장 벡터
     pub m_ref: [f32; 3],
+
+    // [정지 상태(Stillness / ZARU) 감지기 필드]
+    pub is_stationary: bool,
+    pub stationary_counter: u32,
+    pub gyro_mean: [f32; 3],
+    pub gyro_var: f32,
+    pub accel_mean: [f32; 3],
+    pub accel_var: f32,
+}
+
+impl Default for RightInvariantInEKF {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RightInvariantInEKF {
-    /// 초기 파라미터로 InEKF 인스턴스 생성
-    pub fn new() -> Self {
+    /// 초기 파라미터로 InEKF 인스턴스 생성 (const fn 지원)
+    pub const fn new() -> Self {
         let mut p = [[0.0f32; 6]; 6];
         // 초기 공분산 설정 (자세 0.1 rad^2, 바이어스 0.01 (rad/s)^2)
-        for i in 0..3 {
-            p[i][i] = 0.1;
-            p[i + 3][i + 3] = 0.01;
-        }
+        p[0][0] = 0.1;
+        p[1][1] = 0.1;
+        p[2][2] = 0.1;
+        p[3][3] = 0.01;
+        p[4][4] = 0.01;
+        p[5][5] = 0.01;
 
         Self {
             rot: So3::identity(),
@@ -77,10 +93,16 @@ impl RightInvariantInEKF {
             p,
             q_gyro: 1e-3,       // 0.001 (rad/s)^2/Hz
             q_bias: 1e-5,       // 0.00001 (rad/s^2)^2/Hz
-            r_accel: 0.2,       // 가속도계 노이즈
-            r_mag: 0.1,         // 지자기 센서 노이즈
+            r_accel: 0.2,       // 기본 가속도계 노이즈
+            r_mag: 0.1,         // 기본 지자기 센서 노이즈
             g_ref: [0.0, 0.0, 9.80665],
             m_ref: [0.35, 0.0, 0.45], // 표준 지구 자기장 정규화 벡터 (북향/하향 성분)
+            is_stationary: false,
+            stationary_counter: 0,
+            gyro_mean: [0.0; 3],
+            gyro_var: 0.0,
+            accel_mean: [0.0, 0.0, 9.80665],
+            accel_var: 0.0,
         }
     }
 
@@ -93,15 +115,79 @@ impl RightInvariantInEKF {
         trace
     }
 
+    /// [정지 상태(Stillness / ZARU) 감지 및 바이어스 적응 갱신]
+    /// 가속도 및 자이로스코프의 1차 이동평균과 분산 추이를 관측하여 정지 상태를 판별.
+    /// 정지 상태 시 자이로 바이어스를 실측값으로 정밀 흡수(ZARU)하고 Yaw 드리프트를 동결한다.
+    pub fn update_stillness(&mut self, gyro_raw: [f32; 3], accel_mps2: [f32; 3]) -> bool {
+        const ALPHA: f32 = 0.05; // 100Hz 기준 약 20~50 샘플(0.2~0.5초) 시정수 지수이동평균
+
+        let mut g_diff_sq = 0.0f32;
+        let mut a_diff_sq = 0.0f32;
+        for i in 0..3 {
+            let diff_g = gyro_raw[i] - self.gyro_mean[i];
+            g_diff_sq += diff_g * diff_g;
+            self.gyro_mean[i] += ALPHA * diff_g;
+
+            let diff_a = accel_mps2[i] - self.accel_mean[i];
+            a_diff_sq += diff_a * diff_a;
+            self.accel_mean[i] += ALPHA * diff_a;
+        }
+
+        self.gyro_var = (1.0 - ALPHA) * self.gyro_var + ALPHA * g_diff_sq;
+        self.accel_var = (1.0 - ALPHA) * self.accel_var + ALPHA * a_diff_sq;
+
+        let a_norm = libm::sqrtf(
+            self.accel_mean[0] * self.accel_mean[0]
+                + self.accel_mean[1] * self.accel_mean[1]
+                + self.accel_mean[2] * self.accel_mean[2],
+        );
+        let g_diff = libm::fabsf(a_norm - 9.80665);
+
+        // 3대 물리적 정지 조건:
+        // 1. 각속도 분산 < 0.0005 (rad/s)^2 (약 1.3 dps 이하 진동)
+        // 2. 가속도 분산 < 0.05 (m/s^2)^2 (선형 가속/충격 없음)
+        // 3. 중력 크기 오차 < 0.5 m/s^2 (순수 1.0g 중력장)
+        let is_still_instant = self.gyro_var < 0.0005 && self.accel_var < 0.05 && g_diff < 0.5;
+
+        if is_still_instant {
+            if self.stationary_counter < 30 {
+                self.stationary_counter += 1;
+            } else {
+                self.is_stationary = true;
+            }
+        } else {
+            self.stationary_counter = 0;
+            self.is_stationary = false;
+        }
+
+        // 정지 상태일 때: ZARU(Zero Angular Rate Update)
+        // 정지 중 계측되는 자이로 값은 100% 바이어스이므로 자이로 바이어스를 점진 흡수
+        if self.is_stationary {
+            const BIAS_LEARN_RATE: f32 = 0.002;
+            for i in 0..3 {
+                self.bias_gyro[i] += BIAS_LEARN_RATE * (gyro_raw[i] - self.bias_gyro[i]);
+            }
+        }
+
+        self.is_stationary
+    }
+
     /// [1단계: 100 Hz 전파 (Propagation / Predict)]
     /// 자이로스코프 측정값(rad/s)과 샘플 주기 dt(s)를 이용한 상태 및 공분산 전파
     pub fn predict(&mut self, gyro_raw: [f32; 3], dt: f32) {
         // 1. 바이어스 보정된 순수 각속도
-        let w_unb = [
+        let mut w_unb = [
             gyro_raw[0] - self.bias_gyro[0],
             gyro_raw[1] - self.bias_gyro[1],
             gyro_raw[2] - self.bias_gyro[2],
         ];
+
+        // 정지 상태 시 물리적 진실에 따라 모든 각속도 적분을 완전히 동결(0.0)하여 Yaw 드리프트를 영구 소거
+        if self.is_stationary {
+            w_unb[0] = 0.0;
+            w_unb[1] = 0.0;
+            w_unb[2] = 0.0;
+        }
 
         // 2. 공칭 자세 갱신: \hat{R}_{k+1} = \hat{R}_k * exp(w_unb * dt)
         let phi = [w_unb[0] * dt, w_unb[1] * dt, w_unb[2] * dt];
@@ -109,7 +195,7 @@ impl RightInvariantInEKF {
         self.rot = self.rot.mul(&delta_rot);
 
         // 3. 상태 전이 행렬 F (6x6) 구성
-        //    \dot{\xi} = -\hat{R} * \delta b_w  ==> F_12 = -\hat{R} * dt
+        //    \dot{\xi} = +\hat{R} * \delta b_w  ==> F_12 = +\hat{R} * dt
         let r_dt = [
             [self.rot.data[0][0] * dt, self.rot.data[0][1] * dt, self.rot.data[0][2] * dt],
             [self.rot.data[1][0] * dt, self.rot.data[1][1] * dt, self.rot.data[1][2] * dt],
@@ -161,38 +247,112 @@ impl RightInvariantInEKF {
 
     /// [2단계: 가속도계 중력 관측 갱신 (Accelerometer Update)]
     /// Right-Invariant 오차 모델: 혁신 z = \hat{R} * y_acc - g_ref, 상수 야코비 H = [-g_ref]_\times
+    /// 가속도 바이어스는 기동 가속도와의 역학적 커플링 오동작을 방지하기 위해 추정하지 않음 (사용자 요구사항 반영).
+    /// 정지 상태에서는 중력 정렬을 강화(R=0.04)하고, 동적 기동 시에는 적응형 노이즈 스케일링으로 모션 왜곡을 차단한다.
     pub fn update_accel(&mut self, accel_raw_mps2: [f32; 3]) -> bool {
-        // 동적 외란 제거 (0.85g ~ 1.15g 범위 밖은 중력 방향 왜곡으로 간주하여 스킵)
         let acc_mag_sq = accel_raw_mps2[0] * accel_raw_mps2[0]
             + accel_raw_mps2[1] * accel_raw_mps2[1]
             + accel_raw_mps2[2] * accel_raw_mps2[2];
-        let g_sq = self.g_ref[0] * self.g_ref[0] + self.g_ref[1] * self.g_ref[1] + self.g_ref[2] * self.g_ref[2];
-        let ratio = acc_mag_sq / g_sq;
-        if ratio < 0.7 || ratio > 1.3 {
+        let acc_mag = libm::sqrtf(acc_mag_sq);
+        let g_norm = 9.80665f32;
+        let g_diff = libm::fabsf(acc_mag - g_norm);
+
+        // 1. 극단적 외란(자유낙하, 강한 충격) 기각 (0.5g ~ 1.8g 범위)
+        if acc_mag < 0.5 * g_norm || acc_mag > 1.8 * g_norm {
             return false;
         }
 
-        self.update_vector_observation(accel_raw_mps2, self.g_ref, self.r_accel)
+        // 2. 적응형 측정 공분산(Adaptive Noise Covariance Scaling)
+        let r_noise = if self.is_stationary {
+            // 정지 상태: 순수 중력장이므로 측정 노이즈를 0.04로 축소하여 Roll/Pitch 신속 정렬
+            0.04
+        } else {
+            // 동적 기동 상태: 선형 가속도 오차와 가속도 분산에 비례하여 노이즈를 수십 배 확대, 자이로 적분에 주도권 위임
+            self.r_accel * (1.0 + 8.0 * g_diff + 20.0 * self.accel_var)
+        };
+
+        self.update_vector_observation(accel_raw_mps2, self.g_ref, r_noise)
     }
 
-    /// [3단계: 지자기 센서 관측 갱신 (Magnetometer Update)]
-    /// 수평면 투영(Decoupled Heading)을 적용하여 Roll/Pitch 간섭을 원천 차단하고 순수 방위각(Yaw)만 보정
+    /// [3단계: 지자기 센서 관측 갱신 (Decoupled 1D Yaw Update)]
+    /// 수평면 투영(Tilt-compensated Decoupled Yaw) 기법을 적용하여
+    /// 지자기 센서의 왜곡이 가속도계의 수평 자세(Roll/Pitch)를 절대 교란하지 못하도록
+    /// 순수 방위각(Yaw, \xi_z) 성분만 1D 칼만 갱신으로 독립 보정한다.
     pub fn update_mag(&mut self, mag_raw_norm: [f32; 3]) -> bool {
         // 1. 공간 좌표계로 지자기 벡터 투영: h = \hat{R} * y_mag
         let h = self.rot.rotate_vec(mag_raw_norm);
 
-        // 2. 수평 성분(bx) 및 수직 성분(bz) 분리 (Madgwick decoupling principle)
-        let bx = libm::sqrtf(h[0] * h[0] + h[1] * h[1]);
-        if bx < 1e-4 {
-            return false; // 극지방(수직 자기장) 특이점 방어
+        // 2. 수평면 투영 크기 계산
+        let h_horiz_sq = h[0] * h[0] + h[1] * h[1];
+        if h_horiz_sq < 1e-4 {
+            return false; // 특이점(수직 복각 극지방) 방어
         }
-        let bz = h[2];
 
-        // 3. 북향(X) 및 하향(Z) 기준 자기장 벡터 구성: [bx, 0, bz]
-        //    (주의: Y 성분을 0으로 강제하여 Yaw 오차만 혁신에 반영되도록 함)
-        let m_ref_dynamic = [bx, 0.0, bz];
+        // 3. 자북 헤딩 오차각 (공간 좌표계 X축 북향 기준 Yaw 각도 오차)
+        //    h_x > 0, h_y = 0 일 때 헤딩 오차가 0
+        let delta_yaw = libm::atan2f(h[1], h[0]);
 
-        self.update_vector_observation(mag_raw_norm, m_ref_dynamic, self.r_mag)
+        // 4. Decoupled 1D 스칼라 칼만 갱신 (오직 Yaw 오차 \xi_z 만 관측)
+        //    관측 야코비 H = [0, 0, 1, 0, 0, 0] (1x6)
+        //    혁신 공분산 S = H * P * H^T + R = P[2][2] + R_mag
+        let s = self.p[2][2] + self.r_mag;
+        if s < 1e-6 {
+            return false;
+        }
+        let s_inv = 1.0 / s;
+
+        // 칼만 게인 K = P * H^T * S^-1 (6x1)
+        // H^T는 index 2만 1.0이므로 P * H^T는 P의 2번째 열(column 2)
+        let mut k_gain = [0.0f32; 6];
+        for i in 0..6 {
+            k_gain[i] = self.p[i][2] * s_inv;
+        }
+
+        // 상태 오차 보정량: Yaw 회전 오차 \Delta \xi_z
+        let delta_xi_z = k_gain[2] * delta_yaw;
+        let exp_neg_yaw = So3::exp([0.0, 0.0, -delta_xi_z]);
+        self.rot = exp_neg_yaw.mul(&self.rot);
+
+        // Z축 자이로 바이어스 완만 보정 (정지 상태가 아닐 때만 칼만 게인 반영)
+        if !self.is_stationary {
+            self.bias_gyro[2] += k_gain[5] * delta_yaw;
+        }
+
+        // 조셉 형태(Joseph Form) 공분산 갱신: P = (I - K*H) * P * (I - K*H)^T + K * R * K^T
+        let mut a = [[0.0f32; 6]; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                let delta = if i == j { 1.0 } else { 0.0 };
+                let kh = if j == 2 { k_gain[i] } else { 0.0 };
+                a[i][j] = delta - kh;
+            }
+        }
+
+        let mut ap = [[0.0f32; 6]; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                let mut sum = 0.0;
+                for k in 0..6 {
+                    sum += a[i][k] * self.p[k][j];
+                }
+                ap[i][j] = sum;
+            }
+        }
+
+        let mut p_new = [[0.0f32; 6]; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                let mut sum = 0.0;
+                for k in 0..6 {
+                    sum += ap[i][k] * a[j][k]; // A^T[k][j] = A[j][k]
+                }
+                // K * R * K^T 성분 더하기
+                p_new[i][j] = sum + k_gain[i] * k_gain[j] * self.r_mag;
+            }
+        }
+
+        self.p = p_new;
+        true
     }
 
     /// 우불변 벡터 관측 갱신 내부 공통 엔진 (상수 야코비 + Joseph Form 갱신)

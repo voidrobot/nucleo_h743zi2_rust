@@ -46,17 +46,18 @@ flowchart TD
     end
 
     subgraph MathCore ["crates/so3-inekf (수학 엔진)"]
-        RT_Loop -->|"각속도 w"| Pred["100Hz 관성 적분: R = R * exp(w_unb * dt)"]
-        RT_Loop -->|"가속도 a"| Up_Acc["중력 관측 갱신: H = -[g]x (상수 야코비)"]
-        Mag_Loop -->|"지자기 m"| Up_Mag["지자기 관측 갱신: H = -[m]x (상수 야코비)"]
+        RT_Loop -->|"각속도 w, 가속도 a"| Still["정지 감지기(Stillness Detector) & ZARU"]
+        Still -->|"동결/적분 각속도"| Pred["100Hz 관성 적분: R = R * exp(w_unb * dt)"]
+        Still -->|"적응형 노이즈"| Up_Acc["중력 관측 갱신: H = -[g]x (적응형 노이즈)"]
+        Mag_Loop -->|"지자기 m"| Up_Mag["1D Decoupled Yaw 갱신: H = [0,0,1,0,0,0]"]
         Pred --> InEKF["RightInvariantInEKF"]
         Up_Acc --> InEKF
         Up_Mag --> InEKF
     end
 
     subgraph Output ["텔레메트리 및 시각화"]
-        InEKF -->|"Roll, Pitch, Yaw, Quat, Bias"| Snapshot["AHRS_SNAPSHOT (원자적 동기화)"]
-        Snapshot --> Web["내장 HTTP 웹서버"]
+        InEKF -->|"Roll, Pitch, Yaw, Quat, Bias, Stillness"| Snapshot["AHRS_SNAPSHOT (원자적 동기화)"]
+        Snapshot --> Web["내장 HTTP 웹서버 (포트 80)"]
         Snapshot --> RTT["1Hz RTT 디버그 콘솔"]
         Web -->|"GET /api/ahrs (JSON)"| RestAPI["REST API 텔레메트리"]
         Web -->|"GET / (HTML/CSS/JS)"| Dashboard3D["브라우저 3D 자세 동기화 (GPU 가속)"]

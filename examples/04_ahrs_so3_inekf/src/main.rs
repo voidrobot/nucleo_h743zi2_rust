@@ -26,7 +26,7 @@ use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_io_async::Write as _;
 use heapless::String;
 use nucleo_bsp::BoardLeds;
-use so3_inekf::{RightInvariantInEKF, So3};
+use so3_inekf::RightInvariantInEKF;
 
 // 1. 하드웨어 인터럽트 바인딩 (I2C1 + ETH)
 bind_interrupts!(struct Irqs {
@@ -53,17 +53,7 @@ static I2C_BUS: I2cBus = Mutex::new(None);
 
 // 4. InEKF 필터 뮤텍스 (100Hz IMU 적분 및 10Hz 지자기 보정 공유)
 type InEkfMutex = Mutex<CriticalSectionRawMutex, RightInvariantInEKF>;
-static INEKF_FILTER: InEkfMutex = Mutex::new(RightInvariantInEKF {
-    rot: So3::identity(),
-    bias_gyro: [0.0; 3],
-    p: [[0.0; 6]; 6],
-    q_gyro: 1e-3,
-    q_bias: 1e-5,
-    r_accel: 0.2,
-    r_mag: 0.1,
-    g_ref: [0.0, 0.0, 9.80665],
-    m_ref: [0.35, 0.0, 0.45],
-});
+static INEKF_FILTER: InEkfMutex = Mutex::new(RightInvariantInEKF::new());
 
 // 5. 통합 AHRS 텔레메트리 스냅샷 구조체
 #[derive(Copy, Clone)]
@@ -75,6 +65,7 @@ pub struct AhrsSnapshot {
     pub rot_matrix: [[f32; 3]; 3],
     pub bias_dps: [f32; 3],
     pub cov_trace: f32,
+    pub is_stationary: bool,
     pub imu_accel_mg: [i16; 3],
     pub imu_gyro_dps: [i16; 3],
     pub mag_mgauss: [i16; 3],
@@ -93,6 +84,7 @@ impl Default for AhrsSnapshot {
             rot_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             bias_dps: [0.0; 3],
             cov_trace: 0.0,
+            is_stationary: false,
             imu_accel_mg: [0; 3],
             imu_gyro_dps: [0; 3],
             mag_mgauss: [0; 3],
@@ -111,6 +103,7 @@ static AHRS_SNAPSHOT: Mutex<CriticalSectionRawMutex, AhrsSnapshot> = Mutex::new(
     rot_matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
     bias_dps: [0.0; 3],
     cov_trace: 0.0,
+    is_stationary: false,
     imu_accel_mg: [0; 3],
     imu_gyro_dps: [0; 3],
     mag_mgauss: [0; 3],
@@ -280,6 +273,8 @@ async fn task_imu_high_priority_rt() {
         // 2. SO(3) Right-Invariant InEKF 연산
         let dt_s = 0.01f32; // 100 Hz = 0.01초
         let mut filter = INEKF_FILTER.lock().await;
+        // 정지 상태(Stillness / ZARU) 감지 및 바이어스 적응 갱신
+        filter.update_stillness(gyro_radps, accel_mps2);
         filter.predict(gyro_radps, dt_s);
         filter.update_accel(accel_mps2);
 
@@ -293,6 +288,7 @@ async fn task_imu_high_priority_rt() {
             filter.bias_gyro[2] * 180.0 / PI,
         ];
         let trace = filter.cov_trace();
+        let is_stationary = filter.is_stationary;
 
         // 4. 스냅샷 원자적 갱신
         let mut snap = AHRS_SNAPSHOT.lock().await;
@@ -303,6 +299,7 @@ async fn task_imu_high_priority_rt() {
         snap.rot_matrix = rot_m;
         snap.bias_dps = bias_dps;
         snap.cov_trace = trace;
+        snap.is_stationary = is_stationary;
         snap.imu_accel_mg = [ax_mg, ay_mg, az_mg];
         snap.imu_gyro_dps = [gx_dps as i16, gy_dps as i16, gz_dps as i16];
         snap.sample_count = count;
@@ -412,7 +409,7 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
             let mut json = String::<768>::new();
             let _ = write!(
                 json,
-                "{{\"euler\":{{\"roll\":{}.{:02},\"pitch\":{}.{:02},\"yaw\":{}.{:02}}},\"quat\":{{\"w\":{}.{:03},\"x\":{}.{:03},\"y\":{}.{:03},\"z\":{}.{:03}}},\"bias_dps\":{{\"bx\":{}.{:02},\"by\":{}.{:02},\"bz\":{}.{:02}}},\"mat\":[[{}.{:02},{}.{:02},{}.{:02}],[{}.{:02},{}.{:02},{}.{:02}],[{}.{:02},{}.{:02},{}.{:02}]],\"imu\":{{\"ax\":{},\"ay\":{},\"az\":{},\"gx\":{},\"gy\":{},\"gz\":{}}},\"mag\":{{\"mx\":{},\"my\":{},\"mz\":{}}},\"stats\":{{\"count\":{},\"dt_us\":{},\"trace\":{}.{:04},\"reqs\":{}}}}}",
+                "{{\"euler\":{{\"roll\":{}.{:02},\"pitch\":{}.{:02},\"yaw\":{}.{:02}}},\"quat\":{{\"w\":{}.{:03},\"x\":{}.{:03},\"y\":{}.{:03},\"z\":{}.{:03}}},\"bias_dps\":{{\"bx\":{}.{:02},\"by\":{}.{:02},\"bz\":{}.{:02}}},\"mat\":[[{}.{:02},{}.{:02},{}.{:02}],[{}.{:02},{}.{:02},{}.{:02}],[{}.{:02},{}.{:02},{}.{:02}]],\"imu\":{{\"ax\":{},\"ay\":{},\"az\":{},\"gx\":{},\"gy\":{},\"gz\":{}}},\"mag\":{{\"mx\":{},\"my\":{},\"mz\":{}}},\"stats\":{{\"count\":{},\"dt_us\":{},\"trace\":{}.{:04},\"reqs\":{},\"stationary\":{}}}}}",
                 snap.roll_deg as i32, (snap.roll_deg.abs() * 100.0) as u32 % 100,
                 snap.pitch_deg as i32, (snap.pitch_deg.abs() * 100.0) as u32 % 100,
                 snap.yaw_deg as i32, (snap.yaw_deg.abs() * 100.0) as u32 % 100,
@@ -438,6 +435,7 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
                 snap.sample_count, snap.imu_dt_us,
                 snap.cov_trace as i32, (snap.cov_trace.abs() * 10000.0) as u32 % 10000,
                 snap.http_request_count,
+                if snap.is_stationary { "true" } else { "false" },
             );
 
             let mut header = String::<256>::new();
@@ -754,6 +752,7 @@ h1 span { color: var(--accent); }
       <div>0.00</div><div>0.00</div><div>1.00</div>
     </div>
     <table class="detail-table">
+      <tr><td>동작 모드 (Stillness / ZARU)</td><td id="motion-mode" style="font-weight:700;color:var(--accent)">초기화 중</td></tr>
       <tr><td>단위 쿼터니언 (w, x, y, z)</td><td id="quat">1.00, 0.00, 0.00, 0.00</td></tr>
       <tr><td>추정 자이로 바이어스 bx, by, bz (dps)</td><td id="bias">0.00, 0.00, 0.00</td></tr>
       <tr><td>가속도계 (X, Y, Z mg)</td><td id="acc">0, 0, 1000</td></tr>
@@ -776,14 +775,24 @@ const loopEl = document.getElementById('loop-stats');
 const traceEl = document.getElementById('cov-trace');
 const matEl = document.getElementById('rot-mat');
 const statusEl = document.getElementById('status');
+const modeEl = document.getElementById('motion-mode');
 
 async function updateTele() {
   try {
     const res = await fetch('/api/ahrs');
     if (!res.ok) return;
     const d = await res.json();
-    statusEl.textContent = '100Hz RT 동기화 중';
-    statusEl.style.color = '#4ade80';
+    if (d.stats.stationary) {
+      statusEl.textContent = '정지 상태 (ZARU 영점 보정)';
+      statusEl.style.color = '#38bdf8';
+      modeEl.textContent = '정지 (ZARU 적분 동결 + 바이어스 흡수)';
+      modeEl.style.color = '#38bdf8';
+    } else {
+      statusEl.textContent = '100Hz RT 동적 기동 중';
+      statusEl.style.color = '#4ade80';
+      modeEl.textContent = '동적 기동 (적응형 공분산 보호)';
+      modeEl.style.color = '#4ade80';
+    }
 
     const r = d.euler.roll;
     const p = d.euler.pitch;
