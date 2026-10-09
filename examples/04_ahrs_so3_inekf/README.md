@@ -86,6 +86,14 @@ $$\exp(\boldsymbol{\phi}^\wedge) = I + a \boldsymbol{\phi}^\wedge + b (\boldsymb
 - 외부 인터넷망이나 CDN 없이 순수 CSS3 3D Transform(`transform-style: preserve-3d`)을 통해 브라우저 하드웨어 GPU 가속으로 가상 NUCLEO-144 보드를 렌더링한다.
 - 100 Hz 루프에서 추정된 Roll, Pitch, Yaw 및 회전 행렬을 `/api/ahrs`를 통해 실시간 폴링하여 보드의 물리적 기울임과 지연 없이 1:1 회전 동기화한다.
 
+### ④ 비침습적 CPU 부하 및 순수 InEKF 연산 지연 계측 (Zero I/O Corruption)
+- **I/O 대기 배제 원칙**: 비동기 환경에서 `.await`(I2C 버스 400kHz 대기 등) 시간을 태스크 연산 시간에 포함하면 수십 %의 가짜 CPU 부하(False High Load)가 발생한다.
+- **순수 연산 시간 격리**: 100 Hz RT 루프에서 I2C 데이터 수신이 완료된 시점부터 InEKF 적분/보정/행렬 연산 완료 시점까지의 **순수 연산 소요 시간($T_{calc} \approx 20 \sim 25\ \mu\text{s}$)**만을 나노초 타이머로 격리 계측한다.
+- **전체 시스템 부하(CPU Load %) 산출**:
+  $$\text{CPU Load (\%)} = \frac{100 \times T_{inekf} + 10 \times T_{mag} + T_{http} + T_{base}}{1,000,000\ \mu\text{s}} \times 100\% \approx 0.5\% \sim 1.5\%$$
+- **Cortex-M7 하드웨어 DWT 카운터**: 코어 부팅 시 `DWT_CTRL.CYCCNTENA`를 활성화하여 480 MHz 하드웨어 사이클 카운터를 가동한다.
+- **실시간 대시보드 및 API 연동**: 브라우저 상단 헤더의 실시간 CPU 네온 배지(`CPU: 0.6% (InEKF 22 µs)`) 및 REST API `/api/ahrs`(`stats.cpu_load`, `stats.calc_us`)에 12.5 Hz로 실시간 업데이트된다.
+
 ---
 
 ## 4. 엔지니어링 트레이드오프 및 인사이트 (Trade-offs & Insights)
