@@ -93,7 +93,11 @@ nucleo_h743zi2_rust/
 │   │   ├── Cargo.toml
 │   │   ├── README.md             # 예제 상세 기술 분석서
 │   │   └── src/main.rs
-│   └── 02_sensor_all_sampling/   # [Step 1] IKS01A3 6종 센서 이종 주기 비동기 샘플링 예제
+│   ├── 02_sensor_all_sampling/   # [Step 1] IKS01A3 6종 센서 이종 주기 비동기 샘플링 예제
+│   │   ├── Cargo.toml
+│   │   ├── README.md             # 예제 상세 기술 분석서
+│   │   └── src/main.rs
+│   └── 03_sensor_web_dashboard/  # [Step 2] LAN8742A RMII 이더넷(DHCP) 및 내장 웹 대시보드 예제
 │       ├── Cargo.toml
 │       ├── README.md             # 예제 상세 기술 분석서
 │       └── src/main.rs
@@ -109,8 +113,9 @@ nucleo_h743zi2_rust/
 
 ### ① 하드웨어 연결 확인
 1. NUCLEO-H743ZI2 보드의 ST Zio 커넥터에 X-NUCLEO-IKS01A3 쉴드를 적층 장착한다.
-2. NUCLEO-H743ZI2의 USB ST-LINK 커넥터(CN1)를 PC에 연결한다.
-3. 호스트에서 ST-LINK/V3E 장치 인식을 확인한다:
+2. 유선 네트워크 실시간 모니터링 예제(`03_sensor_web_dashboard`) 구동 시, 온보드 RJ45 이더넷 포트에 LAN 케이블을 공유기/스위치와 연결한다.
+3. NUCLEO-H743ZI2의 USB ST-LINK 커넥터(CN1)를 PC에 연결한다.
+4. 호스트에서 ST-LINK/V3E 장치 인식을 확인한다:
    ```bash
    probe-rs list
    ```
@@ -122,4 +127,12 @@ cargo run -p blinky_01
 
 # 02_sensor_all_sampling: IKS01A3 6종 센서 이종 주기(100Hz, 10Hz, 1Hz) 비동기 샘플링 예제
 cargo run -p sensor_all_sampling_02
+
+# 03_sensor_web_dashboard: LAN8742A 유선 이더넷(DHCP) 및 내장 웹 대시보드 모니터링 예제
+cargo run -p sensor_web_dashboard_03
 ```
+
+> **웹 대시보드 접속 안내**:
+> `sensor_web_dashboard_03` 실행 시 DHCP 서버로부터 IP(예: `192.168.50.92`)를 자동 할당받는다.
+> - **웹 대시보드 GUI**: 웹 브라우저에서 `http://<할당된_IP>/` 접속 (다크 글래스모피즘 UI)
+> - **REST API**: `curl -s http://<할당된_IP>/api/sensors` (JSON 센서 원시 데이터)
