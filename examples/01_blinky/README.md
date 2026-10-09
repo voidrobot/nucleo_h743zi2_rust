@@ -2,14 +2,15 @@
 title: "NUCLEO-H743ZI2 Embassy 온보드 LED 순차 점멸 예제 (01_blinky)"
 source: "examples/01_blinky"
 created: "2026-10-09 19:00:20"
-modified: "2026-10-09 19:00:20"
-description: "NUCLEO-H743ZI2 온보드 3색 LED(Green, Yellow, Red)를 Embassy 비동기 타이머 기반으로 순차 점멸하고 defmt RTT 로그를 검증하는 기본 보드 브링업 예제 분석서"
+modified: "2026-10-09 19:05:15"
+description: "NUCLEO-H743ZI2 온보드 3색 LED 순차 점멸 예제 및 RTT/defmt의 C/C++ 대비 아키텍처적 차별점 심층 분석서"
 tags:
   - "embedded-rust"
   - "embassy"
   - "stm32h743"
   - "blinky"
   - "defmt-rtt"
+  - "rtt-deep-dive"
   - "nucleo-bsp"
 ---
 
@@ -86,7 +87,33 @@ sequenceDiagram
 
 ---
 
-## 4. 엔지니어링 트레이드오프 및 인사이트 (Trade-offs & Insights)
+## 4. 심층 분석: RTT 메커니즘과 Rust `defmt`의 차별성 (Deep Dive: RTT & defmt)
+
+### ① RTT (Real-Time Transfer)의 본질과 C/C++ 생태계
+- **기원**: RTT는 SEGGER가 자사 J-Link 디버거를 위해 고안한 통신 규격으로, 언어에 종속되지 않는 하드웨어 디버그 기술이다.
+- **C/C++에서의 사용**: C/C++ 임베디드 프로젝트에서도 `SEGGER_RTT.c` 소스를 포함하여 `SEGGER_RTT_printf(0, "val: %d\r\n", val)` 형태로 UART 대체재로 널리 사용해 왔다.
+- **물리 계층 동작 원리**: 칩 내부 SRAM에 `_SEGGER_RTT` 제어 블록(링 버퍼)을 할당해 두고, ST-LINK나 J-Link 디버거가 SWD(Serial Wire Debug) 버스의 AHB-AP(Access Port)를 통해 CPU를 멈추지 않고(Non-intrusive) 메모리를 직접 읽어 호스트 PC로 스트리밍한다.
+
+### ② C/C++ 일반 RTT vs Rust `defmt` 비교 분석
+
+RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)를 어디에서 수행하는가"**에서 결정적 아키텍처 차이가 발생한다.
+
+| 비교 항목 | C/C++ 전통적 RTT (`SEGGER_RTT_printf`) | Rust 생태계 (`defmt::info!`) |
+| :--- | :--- | :--- |
+| **통신 물리 채널** | SRAM RTT 링 버퍼 (SWD 읽기) | SRAM RTT 링 버퍼 (SWD 읽기) |
+| **포맷 서식 문자열 저장소** | **MCU 플래시 메모리 (ROM)** | **호스트 PC ELF 심볼 테이블** (MCU 점유 0B) |
+| **문자열 변환 연산 주체** | **MCU Cortex-M7 코어** | **호스트 PC CPU (`probe-rs`)** |
+| **버퍼에 기록되는 페이로드** | 완성된 ASCII 문자열 (수십 바이트) | **정수 토큰 ID + 원시 바이트** (2~4바이트) |
+| **CPU 실행 지연 시간** | 수 마이크로초 ~ 수십 마이크로초 | **수십 나노초 (수 CPU 사이클)** |
+| **타이밍 왜곡 (Heisenbug)** | 포맷팅 부하로 실시간 루프 교란 가능 | 부하가 극소화되어 타이밍 왜곡 실질적 배제 |
+
+### ③ C/C++ 환경과의 비교 및 Rust의 엔지니어링 혁신
+- **C/C++에서의 포맷팅 지연 시도**: C/C++에서도 Google의 `Pigweed (pw_tokenizer)`나 일부 차량용 트레이서가 유사한 토큰화 방식을 지원하지만, 복잡한 매크로 트릭, 별도의 후처리 파이썬 스크립트, 독립 데몬 프로세스를 빌드 시스템(CMake/GN)에 수동 결합해야 하는 진입장벽이 존재한다.
+- **Rust의 네이티브 통합**: Rust는 컴파일러 단계의 프로시저 매크로(Proc Macro)와 링커 섹션 제어 능력을 바탕으로, 개발자가 추가 툴체인 설정 없이 `Cargo.toml` 의존성과 `probe-rs` 러너만으로 이 고도화된 포맷팅 지연 파이프라인을 원클릭(`cargo run`)으로 사용할 수 있도록 완성도를 끌어올렸다.
+
+---
+
+## 5. 엔지니어링 트레이드오프 및 인사이트 (Trade-offs & Insights)
 
 ### ① 장점 (Pros)
 - **보드 브링업의 결정론적 검증**: LED 3색이 정확히 녹색 → 노란색 → 빨간색 순으로 회전하는 시각적 피드백을 통해 칩의 정상 클럭 공급 여부를 즉시 판별할 수 있다.
@@ -98,7 +125,7 @@ sequenceDiagram
 
 ---
 
-## 5. 실행 및 검증 방법 (Run & Verification)
+## 6. 실행 및 검증 방법 (Run & Verification)
 
 ### ① 실행 명령어
 NUCLEO-H743ZI2 보드가 USB로 연결된 상태에서 워크스페이스 최상위 루트에서 아래 명령을 실행한다:
@@ -120,7 +147,7 @@ cargo run -p blinky_01
 
 ---
 
-## 6. 관련 문서 및 소스코드 참조 (References)
+## 7. 관련 문서 및 소스코드 참조 (References)
 - [예제 메인 소스코드](src/main.rs): `01_blinky` 비동기 점멸 구현체
 - [예제 패키지 설정](Cargo.toml): `blinky_01` 크레이트 의존성 정의
 - [BSP 라이브러리](../../crates/nucleo-bsp/src/lib.rs): 온보드 핀아웃 및 `BoardLeds` 구조체
