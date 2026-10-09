@@ -2,7 +2,7 @@
 title: "NUCLEO-H743ZI2 Embassy 온보드 LED 순차 점멸 예제 (01_blinky)"
 source: "examples/01_blinky"
 created: "2026-10-09 19:00:20"
-modified: "2026-10-09 19:08:17"
+modified: "2026-10-09 19:12:04"
 description: "NUCLEO-H743ZI2 온보드 3색 LED 순차 점멸 예제 및 RTT/defmt의 C/C++ 대비 아키텍처적 차별점 심층 분석서"
 tags:
   - "embedded-rust"
@@ -126,6 +126,20 @@ RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)�
 - **차별점 (편의성과 극한의 성능 최적화)**:
   - C/C++ 환경에서는 별도의 도구들을 복합적으로 조합해야 했던 하드웨어 RTT 고속도로를, Rust는 **`probe-rs` 러너를 통해 가장 직관적인 단일 CLI 인터페이스로 추상화**했다.
   - 나아가 단순 전송 채널 활용에 그치지 않고, 컴파일러 레벨의 **`defmt` 지연 포맷팅 기술을 결합하여 실어 나르는 짐(문자열 조합 CPU 연산 및 ROM 플래시 점유) 자체를 호스트 PC로 전면 오프로딩**함으로써 칩의 리소스 부담을 물리적 극한까지 경감시켰다.
+
+### ⑥ 주요 응용: 고속 이벤트 추적 및 고급 프로파일링 (Advanced Profiling Applications)
+초저지연 RTT와 제로-오버헤드 `defmt`의 결합은 단순한 디버그 텍스트 출력을 넘어, 전통적 UART 환경에서는 불가능했던 정밀 계측 영역을 열어준다:
+
+1. **태스크 간 문맥 전환(Context Switching) 실시간 추적**:
+   - FreeRTOS나 Embassy 비동기 런타임 스케줄러가 작업 바통을 넘기는 순간(수 µs 이내), 훅 함수에서 단 50ns 만에 `[Task A -> Task B]` 이벤트 토큰을 RTT 버퍼에 남긴다.
+   - 실제로 임베디드 업계 표준 프로파일러인 **SEGGER SystemView**가 바로 이 RTT 기술을 기반으로 태스크 선점(Preemption)과 실행 타임라인 그래프를 시각화한다.
+2. **고속 인터럽트(ISR) 실행 시간 및 지터(Jitter) 계측**:
+   - STM32H743의 Cortex-M7 코어 내장 **DWT (Data Watchpoint and Trace)의 `CYCCNT` (Cycle Counter)**와 결합하면 극한의 정밀도 달성이 가능하다.
+   - 480 MHz 동작 기준 **1 사이클은 약 2.08 나노초(ns)**이므로, 외부 핀 인터럽트 진입/종료 사이클 카운트를 RTT로 가볍게 밀어 넣어 나노초 단위의 실행 시간과 응답 지연(Latency) 지터를 실시간 포착할 수 있다.
+3. **인터럽트 중첩(Nesting) 및 우선순위 역전(Priority Inversion) 병목 포착**:
+   - 고우선순위 인터럽트가 저우선순위 ISR을 선점하거나, 특정 드라이버가 임계 구역(Critical Section)을 과도하게 길게 점유하여 발생하는 시스템 병목을 실시간성 왜곡 없이 그대로 적발할 수 있다.
+4. **본 프로젝트(NUCLEO-H743ZI2) 센서 파이프라인 적용 전망**:
+   - 향후 [Step 3/4]의 **LSM6DSO 6.66 kHz 고속 가속도 데이터 레디(DRDY) 인터럽트**, **I2C DMA 버퍼 완료 인터럽트**, **Madgwick AHRS 자세 추정 태스크**가 480 MHz 위에서 동시 다발적으로 경쟁할 때, CPU 연산 능력을 1%도 잠식하지 않으면서 각 태스크의 기상/수면 주기를 마이크로초 단위로 완벽하게 감시할 수 있는 토대가 된다.
 
 ---
 
