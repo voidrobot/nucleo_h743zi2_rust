@@ -2,7 +2,7 @@
 title: "NUCLEO-H743ZI2 SO(3) Right-Invariant InEKF 자세 추정 및 3D 웹 대시보드 (04_ahrs_so3_inekf)"
 source: "examples/04_ahrs_so3_inekf"
 created: "2026-10-09 22:30:00"
-modified: "2026-10-09 22:30:00"
+modified: "2026-10-10 00:25:00"
 description: "리 군 SO(3) 다양체 및 우불변(Right-Invariant) 오차 역학을 적용하여 선형화 오차 없는 상수 야코비 기반 자세 추정을 구현하고, 온보드 이더넷(DHCP)과 내장 3D 웹 대시보드로 실시간 시각화하는 임베디드 AHRS 예제"
 tags:
   - "embedded-rust"
@@ -107,13 +107,19 @@ $$\exp(\boldsymbol{\phi}^\wedge) = I + a \boldsymbol{\phi}^\wedge + b (\boldsymb
 
 ## 5. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 호스트 유닛 테스트 (수학 불변성 검증)
-알고리즘 및 수학 연산 코어는 호스트 x86_64 타깃으로 격리 단위 테스트를 실행한다:
+### ① 호스트 유닛 및 nalgebra 오라클 차등 테스트 (수학적 무결성 전수 검증)
+알고리즘 및 수학 연산 코어는 호스트 x86_64 타깃으로 `nalgebra`를 레퍼런스 오라클로 활용한 4대 차등 테스트 스위트(총 19개 테스트)를 실행한다:
 
 ```bash
-cargo test --target x86_64-unknown-linux-gnu -p so3-inekf --lib
+cargo test --target x86_64-unknown-linux-gnu -p so3-inekf
 ```
-- $SO(3)$ 지수/로그 왕복 오차, 특이점 테일러 전개, 중력 수렴, ZARU 정지 감지 및 1D 지자기 디커플링 정상 검증 (6개 테스트 전원 통과).
+
+- **기본 라이브러리 단위 테스트 (`--lib`)**: $SO(3)$ 지수/로그 왕복, 테일러 전개, 중력 수렴, ZARU 정지 감지, 1D 지자기 디커플링 (6개 통과).
+- **리 군 불변조건 차등 테스트 (`oracle_lie_group`)**: 200회 무작위 회전 벡터 `So3::exp` $\leftrightarrow$ `nalgebra::Rotation3`, $10^{-9}$ 특이점 방어, `So3::log` 및 `UnitQuaternion` 양방향 복원, $\exp(\text{Ad}_R \omega) == R \exp(\omega) R^T$ 수반 작용, 직교성 및 $\det(R)=1.0$ (6개 통과).
+- **선형대수 정합성 차등 테스트 (`oracle_kalman_algebra`)**: 100회 무작위 양정치 행렬 `invert_3x3` $\leftrightarrow$ `Matrix3::try_inverse()`, 특이행렬 `None` 방어, 조셉 형태(Joseph Form) 공분산 갱신 3중 루프 vs `nalgebra` 대수식 $10^{-4}$ 이내 일치 (3개 통과).
+- **장기 안정성 및 고유값 감사 (`oracle_filter_invariants`)**: 2,000 스텝(20초) 가혹 난수 스트림 하 공분산 대칭성($|P_{ij}-P_{ji}| < 10^{-4}$), 매 100스텝마다 `nalgebra::Cholesky` 양정치성($\lambda_i > 0$) 전수 통과, $10g$ 충격 기각, ZARU 지수 수렴 (3개 통과).
+- **3D 가상 궤적 시뮬레이션 벤치마크 (`oracle_trajectory_sim`)**: 10초(1,000스텝) 3축 정현파 궤적 및 센서 노이즈 하 Ground Truth 대비 자세 추정 오차 RMSE $1.85^\circ$ ($< 3.0^\circ$ 기준 충족) (1개 통과).
+- **타깃 빌드 제로 비용(Zero Cost)**: `nalgebra`는 `[dev-dependencies]`에만 격리 선언되어 타깃 펌웨어 플래시 크기(107 KB) 및 480 MHz 실시간성에 미치는 영향 0%.
 
 ### ② 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
 STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 펌웨어를 컴파일한다:
@@ -157,3 +163,7 @@ cargo run -p ahrs_so3_inekf_04 --release
 - [so3.rs](../../crates/so3-inekf/src/so3.rs): Lie Group $SO(3)$ 및 $\mathfrak{so}(3)$ 연산자 구현체
 - [inekf.rs](../../crates/so3-inekf/src/inekf.rs): 6D Right-Invariant InEKF 엔진
 - [main.rs](src/main.rs): 100 Hz RT-IMU 선점 루프 및 3D 웹서버 펌웨어
+- [oracle_lie_group.rs](../../crates/so3-inekf/tests/oracle_lie_group.rs): $SO(3)$ 리 군 불변조건 nalgebra 차등 테스트
+- [oracle_kalman_algebra.rs](../../crates/so3-inekf/tests/oracle_kalman_algebra.rs): 여인수 역행렬 및 조셉 형태 공분산 갱신 차등 테스트
+- [oracle_filter_invariants.rs](../../crates/so3-inekf/tests/oracle_filter_invariants.rs): 2,000스텝 촐레스키 양정치성 및 ZARU 감사 테스트
+- [oracle_trajectory_sim.rs](../../crates/so3-inekf/tests/oracle_trajectory_sim.rs): 10초 3D 합성 궤적 Ground Truth 대비 InEKF RMSE 벤치마크
