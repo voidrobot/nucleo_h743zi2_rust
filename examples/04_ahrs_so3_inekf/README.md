@@ -40,26 +40,26 @@ tags:
 ```mermaid
 flowchart TD
     subgraph Hardware ["NUCLEO-H743ZI2 + X-NUCLEO-IKS01A3"]
-        LSM["LSM6DSO (6축 IMU)"] -->|I2C1 400kHz DMA| RT_Loop["100Hz RT-IMU 선점 루프 (NVIC CEC P6)"]
-        LIS["LIS2MDL (3축 지자기)"] -->|I2C1 400kHz| Mag_Loop["10Hz 지자기 관측 태스크"]
-        ETH["LAN8742A RMII PHY"] <-->|DHCPv4 / TCP Port 80| Net_Stack["embassy-net 스택"]
+        LSM["LSM6DSO (6축 IMU)"] -->|"I2C1 400kHz DMA"| RT_Loop["100Hz RT-IMU 선점 루프 (NVIC CEC P6)"]
+        LIS["LIS2MDL (3축 지자기)"] -->|"I2C1 400kHz"| Mag_Loop["10Hz 지자기 관측 태스크"]
+        ETH["LAN8742A RMII PHY"] <-->|"DHCPv4 / TCP Port 80"| Net_Stack["embassy-net 스택"]
     end
 
     subgraph MathCore ["crates/so3-inekf (수학 엔진)"]
-        RT_Loop -->|각속도 w| Pred["100Hz 관성 적분: R = R * exp(w_unb * dt)"]
-        RT_Loop -->|가속도 a| Up_Acc["중력 관측 갱신: H = -[g]x (상수 야코비)"]
-        Mag_Loop -->|지자기 m| Up_Mag["지자기 관측 갱신: H = -[m]x (상수 야코비)"]
+        RT_Loop -->|"각속도 w"| Pred["100Hz 관성 적분: R = R * exp(w_unb * dt)"]
+        RT_Loop -->|"가속도 a"| Up_Acc["중력 관측 갱신: H = -[g]x (상수 야코비)"]
+        Mag_Loop -->|"지자기 m"| Up_Mag["지자기 관측 갱신: H = -[m]x (상수 야코비)"]
         Pred --> InEKF["RightInvariantInEKF"]
         Up_Acc --> InEKF
         Up_Mag --> InEKF
     end
 
     subgraph Output ["텔레메트리 및 시각화"]
-        InEKF -->|Roll, Pitch, Yaw, Quat, Bias| Snapshot["AHRS_SNAPSHOT (원자적 동기화)"]
+        InEKF -->|"Roll, Pitch, Yaw, Quat, Bias"| Snapshot["AHRS_SNAPSHOT (원자적 동기화)"]
         Snapshot --> Web["내장 HTTP 웹서버"]
         Snapshot --> RTT["1Hz RTT 디버그 콘솔"]
-        Web -->|GET /api/ahrs (JSON)| RestAPI["REST API 텔레메트리"]
-        Web -->|GET / (HTML/CSS/JS)| Dashboard3D["브라우저 3D 자세 동기화 (GPU 가속)"]
+        Web -->|"GET /api/ahrs (JSON)"| RestAPI["REST API 텔레메트리"]
+        Web -->|"GET / (HTML/CSS/JS)"| Dashboard3D["브라우저 3D 자세 동기화 (GPU 가속)"]
     end
 ```
 

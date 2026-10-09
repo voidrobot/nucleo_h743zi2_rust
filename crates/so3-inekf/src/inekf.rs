@@ -122,7 +122,8 @@ impl RightInvariantInEKF {
         }
         for i in 0..3 {
             for j in 0..3 {
-                f[i][j + 3] = -r_dt[i][j];
+                // Right-Invariant 오차 역학: \dot{\xi} = +\hat{R} * \delta b_w
+                f[i][j + 3] = r_dt[i][j];
             }
         }
 
@@ -175,9 +176,23 @@ impl RightInvariantInEKF {
     }
 
     /// [3단계: 지자기 센서 관측 갱신 (Magnetometer Update)]
-    /// Right-Invariant 오차 모델: 혁신 z = \hat{R} * y_mag - m_ref, 상수 야코비 H = [-m_ref]_\times
+    /// 수평면 투영(Decoupled Heading)을 적용하여 Roll/Pitch 간섭을 원천 차단하고 순수 방위각(Yaw)만 보정
     pub fn update_mag(&mut self, mag_raw_norm: [f32; 3]) -> bool {
-        self.update_vector_observation(mag_raw_norm, self.m_ref, self.r_mag)
+        // 1. 공간 좌표계로 지자기 벡터 투영: h = \hat{R} * y_mag
+        let h = self.rot.rotate_vec(mag_raw_norm);
+
+        // 2. 수평 성분(bx) 및 수직 성분(bz) 분리 (Madgwick decoupling principle)
+        let bx = libm::sqrtf(h[0] * h[0] + h[1] * h[1]);
+        if bx < 1e-4 {
+            return false; // 극지방(수직 자기장) 특이점 방어
+        }
+        let bz = h[2];
+
+        // 3. 북향(X) 및 하향(Z) 기준 자기장 벡터 구성: [bx, 0, bz]
+        //    (주의: Y 성분을 0으로 강제하여 Yaw 오차만 혁신에 반영되도록 함)
+        let m_ref_dynamic = [bx, 0.0, bz];
+
+        self.update_vector_observation(mag_raw_norm, m_ref_dynamic, self.r_mag)
     }
 
     /// 우불변 벡터 관측 갱신 내부 공통 엔진 (상수 야코비 + Joseph Form 갱신)
