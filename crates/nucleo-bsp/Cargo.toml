@@ -1,0 +1,19 @@
+[package]
+name = "nucleo-bsp"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Board Support Package for NUCLEO-H743ZI2 and X-NUCLEO-IKS01A3"
+
+[dependencies]
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embassy-stm32.workspace = true
+embassy-time.workspace = true
+embassy-sync.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+panic-probe.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "blinky_01"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Blinky example toggling on-board LEDs on NUCLEO-H743ZI2"
+
+[dependencies]
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+nucleo-bsp.workspace = true
+embassy-executor.workspace = true
+embassy-stm32.workspace = true
+embassy-time.workspace = true
+defmt.workspace = true
