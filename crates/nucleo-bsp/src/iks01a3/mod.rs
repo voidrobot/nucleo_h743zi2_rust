@@ -10,12 +10,12 @@
 //! 5. **STTS751**: ±0.5°C 고정밀 I2C 로컬 온도 센서
 //! 6. **HTS221**: 정전용량식 디지털 온습도 센서 (OTP 캘리브레이션 지원)
 
+pub mod hts221_calib;
 pub mod registers;
 pub mod sensitivity;
-pub mod hts221_calib;
 
+pub use hts221_calib::Hts221Calibration;
 pub use registers::addresses::*;
 pub use registers::who_am_i::*;
 pub use registers::{hts221, lis2dw12, lis2mdl, lps22hh, lsm6dso, stts751};
 pub use sensitivity::constants::*;
-pub use hts221_calib::Hts221Calibration;

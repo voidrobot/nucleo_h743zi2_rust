@@ -1,10 +1,11 @@
 #![no_std]
+#![allow(clippy::needless_range_loop)]
 
-pub mod so3;
 pub mod inekf;
+pub mod so3;
 
-pub use so3::So3;
 pub use inekf::RightInvariantInEKF;
+pub use so3::So3;
 
 #[cfg(test)]
 mod tests {
@@ -103,7 +104,10 @@ mod tests {
             filter.update_accel(stationary_accel);
         }
 
-        assert!(filter.is_stationary, "35회 연속 정지 입력 후 is_stationary는 true여야 함");
+        assert!(
+            filter.is_stationary,
+            "35회 연속 정지 입력 후 is_stationary는 true여야 함"
+        );
         // 정지 상태 확정 시점의 Yaw 각도 기록
         let (_r, _p, yaw_freeze) = filter.rot.to_euler_deg();
 
@@ -144,9 +148,21 @@ mod tests {
 
         let (roll, pitch, yaw) = filter.rot.to_euler_deg();
         // Roll과 Pitch는 지자기 갱신에 의해 절대 왜곡되지 않아야 함 (0도 유지)
-        assert!(roll.abs() < 0.01, "지자기 센서 갱신 후 Roll 왜곡 방지 검증: roll={}", roll);
-        assert!(pitch.abs() < 0.01, "지자기 센서 갱신 후 Pitch 왜곡 방지 검증: pitch={}", pitch);
+        assert!(
+            roll.abs() < 0.01,
+            "지자기 센서 갱신 후 Roll 왜곡 방지 검증: roll={}",
+            roll
+        );
+        assert!(
+            pitch.abs() < 0.01,
+            "지자기 센서 갱신 후 Pitch 왜곡 방지 검증: pitch={}",
+            pitch
+        );
         // Yaw는 지자기 측정 방향인 30도로 수렴해야 함
-        assert!(yaw > 15.0 && yaw <= 31.0, "지자기 센서 갱신 후 Yaw 수렴 검증: yaw={}", yaw);
+        assert!(
+            yaw > 15.0 && yaw <= 31.0,
+            "지자기 센서 갱신 후 Yaw 수렴 검증: yaw={}",
+            yaw
+        );
     }
 }

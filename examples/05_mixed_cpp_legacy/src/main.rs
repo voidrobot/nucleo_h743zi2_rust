@@ -45,24 +45,41 @@ async fn main(_spawner: Spawner) {
 
     // 2. LSM6DSO 6축 IMU 센서 WHO_AM_I 검증 및 활성화
     let mut who = [0u8; 1];
-    if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[REG_WHO_AM_I], &mut who).await {
+    if let Err(e) = i2c
+        .write_read(ADDR_LSM6DSO, &[REG_WHO_AM_I], &mut who)
+        .await
+    {
         error!("LSM6DSO WHO_AM_I 읽기 실패: {:?}", e);
         leds.red.set_high();
         return;
     }
-    info!("LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_LSM6DSO);
+    info!(
+        "LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})",
+        who[0], ID_LSM6DSO
+    );
 
     // CTRL1_XL = 0x62 (416Hz ODR, ±2g, LPF2 활성화)
-    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_416HZ_2G_LPF2]).await;
+    let _ = i2c
+        .write(
+            ADDR_LSM6DSO,
+            &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_416HZ_2G_LPF2],
+        )
+        .await;
     // CTRL2_G = 0x60 (416Hz ODR, ±250dps)
-    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_416HZ_250DPS]).await;
+    let _ = i2c
+        .write(
+            ADDR_LSM6DSO,
+            &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_416HZ_250DPS],
+        )
+        .await;
     info!("LSM6DSO 416Hz ODR 하드웨어 가속도계 가동 완료");
 
     // 3. 레거시 C++ Biquad 필터 인스턴스 초기화 (Zero-Allocation 인라인 스택 할당)
-    // 샘플링 주파수: 100 Hz, 차단 주파수: 5 Hz (고주파 노이즈 제거), Q: 0.7071 (Butterworth)
-    let mut filter_x = SafeBiquadFilter::new_lpf(100.0, 5.0, 0.7071);
-    let mut filter_y = SafeBiquadFilter::new_lpf(100.0, 5.0, 0.7071);
-    let mut filter_z = SafeBiquadFilter::new_lpf(100.0, 5.0, 0.7071);
+    // 샘플링 주파수: 100 Hz, 차단 주파수: 5 Hz (고주파 노이즈 제거), Q: 1/√2 (Butterworth)
+    let q_butterworth = core::f32::consts::FRAC_1_SQRT_2;
+    let mut filter_x = SafeBiquadFilter::new_lpf(100.0, 5.0, q_butterworth);
+    let mut filter_y = SafeBiquadFilter::new_lpf(100.0, 5.0, q_butterworth);
+    let mut filter_z = SafeBiquadFilter::new_lpf(100.0, 5.0, q_butterworth);
     info!("C++ BiquadFilter 3축(X, Y, Z) 인스턴스 초기화 완료 (Fs=100Hz, Fc=5Hz)");
 
     leds.green.set_low();
@@ -77,7 +94,10 @@ async fn main(_spawner: Spawner) {
         count = count.wrapping_add(1);
 
         // LSM6DSO 가속도계 데이터 레지스터 (OUTX_L_A ~ OUTZ_H_A) 6바이트 버스트 읽기
-        if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_A], &mut accel_buf).await {
+        if let Err(e) = i2c
+            .write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_A], &mut accel_buf)
+            .await
+        {
             warn!("가속도계 읽기 오류: {:?}", e);
             continue;
         }
@@ -97,7 +117,7 @@ async fn main(_spawner: Spawner) {
         let az_filt = filter_z.process(az_mg);
 
         // 매 100스텝(1초)마다 RTT로 원시 노이즈 데이터 vs C++ 필터링 데이터 비교 출력
-        if count % 100 == 0 {
+        if count.is_multiple_of(100) {
             info!(
                 "[100Hz #{}] RAW: [{=f32}, {=f32}, {=f32}] mg | C++ LPF: [{=f32}, {=f32}, {=f32}] mg",
                 count, ax_mg, ay_mg, az_mg, ax_filt, ay_filt, az_filt
@@ -105,7 +125,7 @@ async fn main(_spawner: Spawner) {
         }
 
         // 50스텝(0.5초)마다 녹색 LED 토글 (하트비트)
-        if count % 50 == 0 {
+        if count.is_multiple_of(50) {
             leds.green.toggle();
         }
     }

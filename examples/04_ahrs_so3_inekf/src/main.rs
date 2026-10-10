@@ -247,27 +247,64 @@ async fn init_sensors() {
 
     // 1. LSM6DSO 초기화
     let mut whoami = [0u8; 1];
-    if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[REG_WHO_AM_I], &mut whoami).await {
+    if let Err(e) = i2c
+        .write_read(ADDR_LSM6DSO, &[REG_WHO_AM_I], &mut whoami)
+        .await
+    {
         error!("LSM6DSO WHO_AM_I 읽기 실패: {:?}", e);
     } else {
-        info!("LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", whoami[0], ID_LSM6DSO);
+        info!(
+            "LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})",
+            whoami[0], ID_LSM6DSO
+        );
     }
 
-    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_104HZ_2G]).await;
-    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_104HZ_250DPS]).await;
+    let _ = i2c
+        .write(
+            ADDR_LSM6DSO,
+            &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_104HZ_2G],
+        )
+        .await;
+    let _ = i2c
+        .write(
+            ADDR_LSM6DSO,
+            &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_104HZ_250DPS],
+        )
+        .await;
 
     // 2. LIS2MDL 초기화
     let mut mag_who = [0u8; 1];
-    if let Err(e) = i2c.write_read(ADDR_LIS2MDL, &[REG_LIS2MDL_WHO_AM_I], &mut mag_who).await {
+    if let Err(e) = i2c
+        .write_read(ADDR_LIS2MDL, &[REG_LIS2MDL_WHO_AM_I], &mut mag_who)
+        .await
+    {
         error!("LIS2MDL WHO_AM_I 읽기 실패: {:?}", e);
     } else {
-        info!("LIS2MDL WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", mag_who[0], ID_LIS2MDL);
+        info!(
+            "LIS2MDL WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})",
+            mag_who[0], ID_LIS2MDL
+        );
     }
 
-    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_RESET]).await;
+    let _ = i2c
+        .write(
+            ADDR_LIS2MDL,
+            &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_RESET],
+        )
+        .await;
     Timer::after_millis(10).await;
-    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_10HZ_CONT]).await;
-    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_C, lis2mdl::VAL_CFG_REG_C_BDU]).await;
+    let _ = i2c
+        .write(
+            ADDR_LIS2MDL,
+            &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_10HZ_CONT],
+        )
+        .await;
+    let _ = i2c
+        .write(
+            ADDR_LIS2MDL,
+            &[lis2mdl::CFG_REG_C, lis2mdl::VAL_CFG_REG_C_BDU],
+        )
+        .await;
 }
 
 /// [Task 1: 100 Hz 하드 실시간 RT-IMU 선점 루프]
@@ -289,7 +326,9 @@ async fn task_imu_high_priority_rt() {
         {
             let mut bus_guard = I2C_BUS.lock().await;
             if let Some(i2c) = bus_guard.as_mut() {
-                let _ = i2c.write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_G], &mut buf).await;
+                let _ = i2c
+                    .write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_G], &mut buf)
+                    .await;
             }
         }
 
@@ -308,7 +347,11 @@ async fn task_imu_high_priority_rt() {
         let gx_dps = lsm6dso::raw_to_dps_f32(gx_raw);
         let gy_dps = lsm6dso::raw_to_dps_f32(gy_raw);
         let gz_dps = lsm6dso::raw_to_dps_f32(gz_raw);
-        let gyro_radps = [gx_dps * DEG_TO_RAD, gy_dps * DEG_TO_RAD, gz_dps * DEG_TO_RAD];
+        let gyro_radps = [
+            gx_dps * DEG_TO_RAD,
+            gy_dps * DEG_TO_RAD,
+            gz_dps * DEG_TO_RAD,
+        ];
 
         let ax_mg = lsm6dso::raw_to_mg(ax_raw);
         let ay_mg = lsm6dso::raw_to_mg(ay_raw);
@@ -372,7 +415,9 @@ async fn task_mag_sampling() {
         {
             let mut bus_guard = I2C_BUS.lock().await;
             if let Some(i2c) = bus_guard.as_mut() {
-                let _ = i2c.write_read(ADDR_LIS2MDL, &[lis2mdl::OUTX_L_REG], &mut buf).await;
+                let _ = i2c
+                    .write_read(ADDR_LIS2MDL, &[lis2mdl::OUTX_L_REG], &mut buf)
+                    .await;
             }
         }
 
@@ -415,7 +460,10 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
     info!("DHCP IP 주소 할당 대기 중...");
     stack.wait_config_up().await;
     if let Some(cfg) = stack.config_v4() {
-        info!(">>> 이더넷 웹서버 준비 완료: http://{}/ <<<", cfg.address.address());
+        info!(
+            ">>> 이더넷 웹서버 준비 완료: http://{}/ <<<",
+            cfg.address.address()
+        );
     }
 
     let mut rx_buffer = [0u8; 1024];

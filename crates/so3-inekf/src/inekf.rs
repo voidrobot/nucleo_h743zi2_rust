@@ -91,10 +91,10 @@ impl RightInvariantInEKF {
             rot: So3::identity(),
             bias_gyro: [0.0; 3],
             p,
-            q_gyro: 1e-3,       // 0.001 (rad/s)^2/Hz
-            q_bias: 1e-5,       // 0.00001 (rad/s^2)^2/Hz
-            r_accel: 0.2,       // 기본 가속도계 노이즈
-            r_mag: 0.1,         // 기본 지자기 센서 노이즈
+            q_gyro: 1e-3, // 0.001 (rad/s)^2/Hz
+            q_bias: 1e-5, // 0.00001 (rad/s^2)^2/Hz
+            r_accel: 0.2, // 기본 가속도계 노이즈
+            r_mag: 0.1,   // 기본 지자기 센서 노이즈
             g_ref: [0.0, 0.0, 9.80665],
             m_ref: [0.35, 0.0, 0.45], // 표준 지구 자기장 정규화 벡터 (북향/하향 성분)
             is_stationary: false,
@@ -197,9 +197,21 @@ impl RightInvariantInEKF {
         // 3. 상태 전이 행렬 F (6x6) 구성
         //    \dot{\xi} = +\hat{R} * \delta b_w  ==> F_12 = +\hat{R} * dt
         let r_dt = [
-            [self.rot.data[0][0] * dt, self.rot.data[0][1] * dt, self.rot.data[0][2] * dt],
-            [self.rot.data[1][0] * dt, self.rot.data[1][1] * dt, self.rot.data[1][2] * dt],
-            [self.rot.data[2][0] * dt, self.rot.data[2][1] * dt, self.rot.data[2][2] * dt],
+            [
+                self.rot.data[0][0] * dt,
+                self.rot.data[0][1] * dt,
+                self.rot.data[0][2] * dt,
+            ],
+            [
+                self.rot.data[1][0] * dt,
+                self.rot.data[1][1] * dt,
+                self.rot.data[1][2] * dt,
+            ],
+            [
+                self.rot.data[2][0] * dt,
+                self.rot.data[2][1] * dt,
+                self.rot.data[2][2] * dt,
+            ],
         ];
 
         let mut f = [[0.0f32; 6]; 6];
@@ -356,7 +368,12 @@ impl RightInvariantInEKF {
     }
 
     /// 우불변 벡터 관측 갱신 내부 공통 엔진 (상수 야코비 + Joseph Form 갱신)
-    fn update_vector_observation(&mut self, y_body: [f32; 3], v_ref: [f32; 3], r_noise: f32) -> bool {
+    fn update_vector_observation(
+        &mut self,
+        y_body: [f32; 3],
+        v_ref: [f32; 3],
+        r_noise: f32,
+    ) -> bool {
         // 1. 공간 투영 혁신: z = \hat{R} * y_body - v_ref (3x1)
         let y_spatial = self.rot.rotate_vec(y_body);
         let z = [

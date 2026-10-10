@@ -121,10 +121,10 @@ mod tests {
         // H0_rH_x2 = 60 (30.0% rH), H1_rH_x2 = 140 (70.0% rH)
         // T0_degC_x8 = 200 (25.0 °C), T1_degC_x8 = 320 (40.0 °C)
         let mut buf = [0u8; 16];
-        buf[0] = 60;  // H0_rH_x2
+        buf[0] = 60; // H0_rH_x2
         buf[1] = 140; // H1_rH_x2
         buf[2] = 200; // T0_degC LSB
-        buf[3] = 64;  // T1_degC LSB (320 = 1 << 8 + 64)
+        buf[3] = 64; // T1_degC LSB (320 = 1 << 8 + 64)
         buf[5] = 0x04; // T1 MSB = 1 (bits 3:2 = 01b -> 0x04)
 
         // H0_T0_OUT = 1000, H1_T0_OUT = 5000

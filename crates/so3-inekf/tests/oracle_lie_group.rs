@@ -12,9 +12,15 @@ const EPSILON: f32 = 1.0e-5;
 /// Helper: convert So3 to nalgebra Matrix3
 fn so3_to_nalgebra(rot: &So3) -> Matrix3<f32> {
     Matrix3::new(
-        rot.data[0][0], rot.data[0][1], rot.data[0][2],
-        rot.data[1][0], rot.data[1][1], rot.data[1][2],
-        rot.data[2][0], rot.data[2][1], rot.data[2][2],
+        rot.data[0][0],
+        rot.data[0][1],
+        rot.data[0][2],
+        rot.data[1][0],
+        rot.data[1][1],
+        rot.data[1][2],
+        rot.data[2][0],
+        rot.data[2][1],
+        rot.data[2][2],
     )
 }
 
@@ -26,7 +32,12 @@ fn assert_matrix_close(m1: &Matrix3<f32>, m2: &Matrix3<f32>, tol: f32, msg: &str
             assert!(
                 diff[(i, j)] <= tol,
                 "{}: mismatch at ({}, {}): m1={}, m2={}, diff={}",
-                msg, i, j, m1[(i, j)], m2[(i, j)], diff[(i, j)]
+                msg,
+                i,
+                j,
+                m1[(i, j)],
+                m2[(i, j)],
+                diff[(i, j)]
             );
         }
     }
@@ -43,7 +54,8 @@ fn test_oracle_exp_map_random() {
             rng.gen_range(-1.0..1.0),
             rng.gen_range(-1.0..1.0),
             rng.gen_range(-1.0..1.0),
-        ).normalize();
+        )
+        .normalize();
         let angle: f32 = rng.gen_range(0.001..(PI - 0.01));
         let omega = axis * angle;
         let w_arr = [omega.x, omega.y, omega.z];
@@ -96,7 +108,8 @@ fn test_oracle_log_map_roundtrip() {
             rng.gen_range(-1.0..1.0),
             rng.gen_range(-1.0..1.0),
             rng.gen_range(-1.0..1.0),
-        ).normalize();
+        )
+        .normalize();
         let angle: f32 = rng.gen_range(0.01..(PI - 0.05));
         let omega = axis * angle;
         let w_arr = [omega.x, omega.y, omega.z];
@@ -105,23 +118,28 @@ fn test_oracle_log_map_roundtrip() {
         let log_w = rot.log();
 
         assert!(
-            (log_w[0] - w_arr[0]).abs() < 1e-3 &&
-            (log_w[1] - w_arr[1]).abs() < 1e-3 &&
-            (log_w[2] - w_arr[2]).abs() < 1e-3,
+            (log_w[0] - w_arr[0]).abs() < 1e-3
+                && (log_w[1] - w_arr[1]).abs() < 1e-3
+                && (log_w[2] - w_arr[2]).abs() < 1e-3,
             "Log mismatch: angle={}, log_w={:?}, w_arr={:?}, diff=[{}, {}, {}]",
-            angle, log_w, w_arr,
-            log_w[0] - w_arr[0], log_w[1] - w_arr[1], log_w[2] - w_arr[2]
+            angle,
+            log_w,
+            w_arr,
+            log_w[0] - w_arr[0],
+            log_w[1] - w_arr[1],
+            log_w[2] - w_arr[2]
         );
 
         // nalgebra check
         let na_rot = Rotation3::from_scaled_axis(omega);
         let na_axis_angle = na_rot.scaled_axis();
         assert!(
-            (log_w[0] - na_axis_angle.x).abs() < 1e-3 &&
-            (log_w[1] - na_axis_angle.y).abs() < 1e-3 &&
-            (log_w[2] - na_axis_angle.z).abs() < 1e-3,
+            (log_w[0] - na_axis_angle.x).abs() < 1e-3
+                && (log_w[1] - na_axis_angle.y).abs() < 1e-3
+                && (log_w[2] - na_axis_angle.z).abs() < 1e-3,
             "nalgebra axis_angle mismatch: log_w={:?}, na={:?}",
-            log_w, na_axis_angle
+            log_w,
+            na_axis_angle
         );
     }
 }
@@ -136,7 +154,8 @@ fn test_oracle_quaternion_conversions() {
             rng.gen_range(-1.0..1.0),
             rng.gen_range(-1.0..1.0),
             rng.gen_range(-1.0..1.0),
-        ).normalize();
+        )
+        .normalize();
         let angle: f32 = rng.gen_range(0.01..(PI - 0.02));
         let omega = axis * angle;
 
@@ -154,7 +173,12 @@ fn test_oracle_quaternion_conversions() {
         assert!(
             (dot.abs() - 1.0).abs() < 1e-4,
             "Quaternion mismatch: custom={:?}, na=[w={}, i={}, j={}, k={}], dot={}",
-            q_custom, na_quat.w, na_quat.i, na_quat.j, na_quat.k, dot
+            q_custom,
+            na_quat.w,
+            na_quat.i,
+            na_quat.j,
+            na_quat.k,
+            dot
         );
 
         // Roundtrip from_quaternion
@@ -217,9 +241,6 @@ fn test_oracle_orthogonality_and_determinant() {
 
         // Check det(R) == 1.0
         let det = m.determinant();
-        assert!(
-            (det - 1.0).abs() < 1e-5,
-            "det(R) != 1.0: det={}", det
-        );
+        assert!((det - 1.0).abs() < 1e-5, "det(R) != 1.0: det={}", det);
     }
 }

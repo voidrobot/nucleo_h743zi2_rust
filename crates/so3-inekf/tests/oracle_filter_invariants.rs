@@ -53,7 +53,12 @@ fn test_oracle_filter_long_run_positive_definiteness() {
                     assert!(
                         diff < 1e-4,
                         "Step {}: Covariance asymmetry at ({}, {}): P_ij={}, P_ji={}, diff={}",
-                        step, i, j, filter.p[i][j], filter.p[j][i], diff
+                        step,
+                        i,
+                        j,
+                        filter.p[i][j],
+                        filter.p[j][i],
+                        diff
                     );
                 }
             }
@@ -64,14 +69,16 @@ fn test_oracle_filter_long_run_positive_definiteness() {
             assert!(
                 chol.is_some(),
                 "Step {}: Covariance matrix lost positive definiteness! Cholesky failed. P={:?}",
-                step, filter.p
+                step,
+                filter.p
             );
 
             // Check 3: Finite values (no NaN or Inf)
             assert!(
                 filter.cov_trace().is_finite(),
                 "Step {}: Covariance trace is not finite: {}",
-                step, filter.cov_trace()
+                step,
+                filter.cov_trace()
             );
         }
     }
@@ -115,7 +122,10 @@ fn test_oracle_zaru_bias_convergence() {
         filter.update_accel(stationary_accel);
     }
 
-    assert!(filter.is_stationary, "Must be stationary after 300 still cycles");
+    assert!(
+        filter.is_stationary,
+        "Must be stationary after 300 still cycles"
+    );
 
     // Verify bias converged towards true_bias
     for i in 0..3 {
@@ -123,7 +133,10 @@ fn test_oracle_zaru_bias_convergence() {
         assert!(
             diff < 0.015,
             "Axis {} bias did not converge: estimated={}, true={}, diff={}",
-            i, filter.bias_gyro[i], true_bias[i], diff
+            i,
+            filter.bias_gyro[i],
+            true_bias[i],
+            diff
         );
     }
 }

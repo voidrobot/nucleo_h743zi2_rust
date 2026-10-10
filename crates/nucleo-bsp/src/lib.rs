@@ -17,16 +17,15 @@ pub mod iks01a3;
 pub mod uid;
 
 /// NUCLEO-H743ZI2 온보드 핀아웃 매핑
-pub mod pins {
-    //! - LED1 (Green): PB0
-    //! - LED2 (Yellow): PE1
-    //! - LED3 (Red): PB14
-    //! - B1 (User Push Button): PC13
-    //!
-    //! Arduino Uno V3 확장 커넥터 (X-NUCLEO-IKS01A3 센서 버스 연동용):
-    //! - D15 (I2C1_SCL): PB8
-    //! - D14 (I2C1_SDA): PB9
-}
+/// - LED1 (Green): PB0
+/// - LED2 (Yellow): PE1
+/// - LED3 (Red): PB14
+/// - B1 (User Push Button): PC13
+///
+/// Arduino Uno V3 확장 커넥터 (X-NUCLEO-IKS01A3 센서 버스 연동용):
+/// - D15 (I2C1_SCL): PB8
+/// - D14 (I2C1_SDA): PB9
+pub mod pins {}
 
 /// NUCLEO-H743ZI2 온보드 사용자 LED 세트
 pub struct BoardLeds<'d> {

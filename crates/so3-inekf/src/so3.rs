@@ -24,11 +24,7 @@ impl So3 {
     /// 단위 회전 행렬 생성 (Identity Matrix)
     pub const fn identity() -> Self {
         Self {
-            data: [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            data: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
 
@@ -72,11 +68,7 @@ impl So3 {
 
     /// 리 대수 so(3) Hat 연산자: w -> [w]_\times
     pub fn hat(w: [f32; 3]) -> [[f32; 3]; 3] {
-        [
-            [0.0, -w[2], w[1]],
-            [w[2], 0.0, -w[0]],
-            [-w[1], w[0], 0.0],
-        ]
+        [[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]]
     }
 
     /// 리 대수 so(3) Vee 연산자: [w]_\times -> w
@@ -129,17 +121,10 @@ impl So3 {
     }
 
     /// 로그 사상 (Logarithm Map): SO(3) -> so(3)
-    /// 3x3 회전 행렬을 회전 벡터 phi in R^3 로 변환
     pub fn log(&self) -> [f32; 3] {
         let trace = self.data[0][0] + self.data[1][1] + self.data[2][2];
         let cos_theta = 0.5 * (trace - 1.0);
-        let cos_theta_clamped = if cos_theta > 1.0 {
-            1.0
-        } else if cos_theta < -1.0 {
-            -1.0
-        } else {
-            cos_theta
-        };
+        let cos_theta_clamped = cos_theta.clamp(-1.0, 1.0);
 
         let theta = acosf(cos_theta_clamped);
         let sin_theta = sinf(theta);
@@ -232,13 +217,7 @@ impl So3 {
         let r = &self.data;
         // Pitch: arcsin(-R[2][0])
         let sin_pitch = -r[2][0];
-        let sin_pitch_clamped = if sin_pitch > 1.0 {
-            1.0
-        } else if sin_pitch < -1.0 {
-            -1.0
-        } else {
-            sin_pitch
-        };
+        let sin_pitch_clamped = sin_pitch.clamp(-1.0, 1.0);
         let pitch_rad = asinf(sin_pitch_clamped);
 
         let (roll_rad, yaw_rad) = if sin_pitch_clamped.abs() < 0.9999 {
@@ -253,6 +232,10 @@ impl So3 {
         };
 
         const RAD_TO_DEG: f32 = 180.0 / core::f32::consts::PI;
-        (roll_rad * RAD_TO_DEG, pitch_rad * RAD_TO_DEG, yaw_rad * RAD_TO_DEG)
+        (
+            roll_rad * RAD_TO_DEG,
+            pitch_rad * RAD_TO_DEG,
+            yaw_rad * RAD_TO_DEG,
+        )
     }
 }

@@ -108,7 +108,11 @@ mod tests {
         for _ in 0..100 {
             out = filter.process(10.0);
         }
-        assert!((out - 10.0).abs() < 0.01, "DC 입력 수렴 오차 초과: out={}", out);
+        assert!(
+            (out - 10.0).abs() < 0.01,
+            "DC 입력 수렴 오차 초과: out={}",
+            out
+        );
     }
 
     #[test]
@@ -128,8 +132,12 @@ mod tests {
 
             // 초기 과도 응답 이후 100샘플 이후 피크 측정
             if i > 100 {
-                if in_val.abs() > max_in { max_in = in_val.abs(); }
-                if out_val.abs() > max_out { max_out = out_val.abs(); }
+                if in_val.abs() > max_in {
+                    max_in = in_val.abs();
+                }
+                if out_val.abs() > max_out {
+                    max_out = out_val.abs();
+                }
             }
         }
 

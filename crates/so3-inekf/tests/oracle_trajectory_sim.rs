@@ -75,9 +75,15 @@ fn test_oracle_trajectory_simulation_convergence() {
         // Compute rotation error: Delta R = R_hat * R_true^T
         let r_hat_data = filter.rot.data;
         let r_hat_na = nalgebra::Matrix3::new(
-            r_hat_data[0][0], r_hat_data[0][1], r_hat_data[0][2],
-            r_hat_data[1][0], r_hat_data[1][1], r_hat_data[1][2],
-            r_hat_data[2][0], r_hat_data[2][1], r_hat_data[2][2],
+            r_hat_data[0][0],
+            r_hat_data[0][1],
+            r_hat_data[0][2],
+            r_hat_data[1][0],
+            r_hat_data[1][1],
+            r_hat_data[1][2],
+            r_hat_data[2][0],
+            r_hat_data[2][1],
+            r_hat_data[2][2],
         );
         let r_err_mat = r_hat_na * r_true.matrix().transpose();
         let r_err_so3 = So3::from_matrix([
@@ -86,7 +92,8 @@ fn test_oracle_trajectory_simulation_convergence() {
             [r_err_mat[(2, 0)], r_err_mat[(2, 1)], r_err_mat[(2, 2)]],
         ]);
         let err_vec = r_err_so3.log();
-        let err_angle = (err_vec[0] * err_vec[0] + err_vec[1] * err_vec[1] + err_vec[2] * err_vec[2]).sqrt();
+        let err_angle =
+            (err_vec[0] * err_vec[0] + err_vec[1] * err_vec[1] + err_vec[2] * err_vec[2]).sqrt();
 
         // Record error after initial convergence period (t > 2.0s / step > 200)
         if step > 200 {
@@ -99,11 +106,15 @@ fn test_oracle_trajectory_simulation_convergence() {
     let rmse_rad = (sum_sq / attitude_errors_rad.len() as f32).sqrt();
     let rmse_deg = rmse_rad * 180.0 / std::f32::consts::PI;
 
-    println!("Simulation 10s Complete: Attitude RMSE = {:.3} deg ({:.4} rad)", rmse_deg, rmse_rad);
+    println!(
+        "Simulation 10s Complete: Attitude RMSE = {:.3} deg ({:.4} rad)",
+        rmse_deg, rmse_rad
+    );
 
     // Verify RMSE is well within acceptable AHRS filter bounds (< 3.0 degrees)
     assert!(
         rmse_deg < 3.0,
-        "Attitude RMSE too high: {:.2} deg (expected < 3.0 deg)", rmse_deg
+        "Attitude RMSE too high: {:.2} deg (expected < 3.0 deg)",
+        rmse_deg
     );
 }

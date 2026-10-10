@@ -16,9 +16,15 @@ fn test_oracle_invert_3x3_positive_definite() {
     for _ in 0..100 {
         // Generate random symmetric positive-definite 3x3 matrix: M = A * A^T + 0.5 * I
         let a: Matrix3<f32> = Matrix3::new(
-            rng.gen_range(-2.0f32..2.0), rng.gen_range(-2.0f32..2.0), rng.gen_range(-2.0f32..2.0),
-            rng.gen_range(-2.0f32..2.0), rng.gen_range(-2.0f32..2.0), rng.gen_range(-2.0f32..2.0),
-            rng.gen_range(-2.0f32..2.0), rng.gen_range(-2.0f32..2.0), rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
+            rng.gen_range(-2.0f32..2.0),
         );
         let m: Matrix3<f32> = a * a.transpose() + 0.5f32 * Matrix3::identity();
 
@@ -40,7 +46,11 @@ fn test_oracle_invert_3x3_positive_definite() {
                 assert!(
                     diff < 1e-4,
                     "Inverse mismatch at ({}, {}): custom={}, oracle={}, diff={}",
-                    i, j, inv_custom[i][j], inv_oracle[(i, j)], diff
+                    i,
+                    j,
+                    inv_custom[i][j],
+                    inv_oracle[(i, j)],
+                    diff
                 );
             }
         }
@@ -51,24 +61,22 @@ fn test_oracle_invert_3x3_positive_definite() {
 #[test]
 fn test_oracle_invert_3x3_singular_matrices() {
     // Rank 1 matrix: all rows identical
-    let rank1 = [
-        [1.0, 2.0, 3.0],
-        [1.0, 2.0, 3.0],
-        [1.0, 2.0, 3.0],
-    ];
-    assert!(invert_3x3(rank1).is_none(), "Rank 1 matrix must return None");
+    let rank1 = [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]];
+    assert!(
+        invert_3x3(rank1).is_none(),
+        "Rank 1 matrix must return None"
+    );
 
     // All zeros
     let zeros = [[0.0; 3]; 3];
     assert!(invert_3x3(zeros).is_none(), "Zero matrix must return None");
 
     // Rank 2: third row is sum of first two
-    let rank2 = [
-        [1.0, 0.0, 2.0],
-        [0.0, 1.0, 3.0],
-        [1.0, 1.0, 5.0],
-    ];
-    assert!(invert_3x3(rank2).is_none(), "Rank 2 matrix must return None");
+    let rank2 = [[1.0, 0.0, 2.0], [0.0, 1.0, 3.0], [1.0, 1.0, 5.0]];
+    assert!(
+        invert_3x3(rank2).is_none(),
+        "Rank 2 matrix must return None"
+    );
 }
 
 /// 3. Joseph Form Covariance Update: compare hand-written 3-nested loops with nalgebra
@@ -171,7 +179,11 @@ fn test_oracle_joseph_form_covariance_update() {
                 assert!(
                     diff < 1e-4,
                     "Joseph form mismatch at ({}, {}): custom={}, oracle={}, diff={}",
-                    i, j, p_custom[i][j], p_oracle[(i, j)], diff
+                    i,
+                    j,
+                    p_custom[i][j],
+                    p_oracle[(i, j)],
+                    diff
                 );
             }
         }
