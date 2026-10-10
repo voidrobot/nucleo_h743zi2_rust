@@ -19,9 +19,51 @@ tags:
 
 ## 1. 개요 및 설계 배경 (Overview & Context)
 
+### ① 레거시 C++ 자산 재활용의 필요성
 임베디드 소프트웨어 개발 현업에서는 이미 수년간의 검증을 거친 고성능 DSP 필터, 모터 제어 PID 알고리즘, 특수 통신 프로토콜 스택 등 방대한 **레거시 C/C++ 자산**이 존재한다. 이러한 자산을 Rust로 완전히 재작성(Rewrite)하는 것은 막대한 비용과 검증 리스크를 수반한다.
 
 본 예제는 NUCLEO-H743ZI2 (Arm® Cortex®-M7 480 MHz) 개발 보드 및 X-NUCLEO-IKS01A3 센서 쉴드 환경에서, **기존 C++로 작성된 2차 IIR Biquad 저주파 통과 필터(LPF) 클래스를 수정 없이 Rust 빌드 파이프라인과 통합 크로스 컴파일**하고, Rust 비동기 펌웨어에서 무오버헤드로 안전하게 실시간 호출하는 표준 아키텍처를 제시한다.
+
+### ② 왜 Makefile/CMake가 아닌 Rust `build.rs`인가? (단일 도구 원칙)
+C/C++ 개발자에게 익숙한 `Makefile`이나 `CMakeLists.txt` 대신 Rust 소스 파일인 `build.rs` 안에서 C++ 컴파일러 플래그와 소스를 정의하는 구조는 낯설게 느껴질 수 있다. 그러나 이는 Rust 생태계의 **공식 표준(De facto standard)**이자 핵심 철학인 **단일 도구 원칙(Single Toolchain Principle)**에 기반한다:
+
+1. **원클릭 빌드 보장**: 사용자는 `cmake .. && make && cargo build`와 같이 외부 빌드 도구를 사전에 설치·실행할 필요 없이, 오직 **`cargo build` 단 한 줄**만으로 C++ 컴파일부터 최종 MCU 바이너리 링크까지 원스톱 완결된다.
+2. **크로스 컴파일 환경변수 완벽 상속**: Cargo가 관리하는 타깃 아키텍처(`TARGET=thumbv7em-none-eabihf`), 최적화 레벨(`OPT_LEVEL`), 출력 디렉터리(`OUT_DIR`)가 `build.rs`에 환경변수로 직접 주입되므로, Makefile과 Cargo 간 설정 불일치(Drift) 및 휴먼 에러가 원천 차단된다.
+3. **Rust 오픈소스 표준 관행**: `ring`(암호학 라이브러리), `openssl-sys`, `libsqlite3-sys`, `zstd-sys`, 임베디드 벤더 BSP 등 C/C++ 코드를 포함하는 거의 모든 주요 Rust 크레이트가 이 `build.rs` + `cc` 방식을 채택하고 있다.
+
+| 구분 | C/C++ 전통 방식 (Makefile / CMake) | Rust 방식 (`build.rs` + `cc` 크레이트) |
+| :--- | :--- | :--- |
+| **빌드 실행** | `cmake` ➔ `make` ➔ `cargo` (다단계 수동 실행) | **`cargo build` 단 한 줄로 C++까지 완전 자동화** |
+| **호스트 도구 의존성** | `make`, `cmake`, `ninja` 등 별도 도구 설치 필수 | Rust 패키지 매니저(`cargo`) 자체 완결 구동 |
+| **타깃 파라미터 동기화** | Makefile과 Cargo 간 아키텍처/FPU 플래그 수동 동기화 | Cargo 빌드 파라미터 자동 상속 (불일치 0%) |
+| **운영체제 호환성** | Linux(`make`), Windows(`nmake`/`mingw`) 파편화 | 호스트 OS에 무관하게 동일한 Rust 스크립트 동작 |
+
+### ③ 2단계(Two-Stage) 빌드 라이프사이클
+
+Cargo는 프로젝트 루트에 `build.rs`가 존재하면 개발 PC(호스트)에서 먼저 `build.rs`를 실행한 후, 생성된 산출물을 MCU 타깃 링크 단계에 결합하는 2단계 빌드를 수행한다:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as "개발자 (cargo build)"
+    participant Cargo as "Cargo 빌드 엔진"
+    participant BuildRs as "build.rs (PC 호스트 실행)"
+    participant Clang as "Clang 18 크로스 컴파일러"
+    participant Rustc as "Rust 링커 (rust-lld)"
+
+    Dev->>Cargo: "cargo build --target thumbv7em-none-eabihf"
+    Note over Cargo,BuildRs: [1단계: 사전 빌드 스크립트 실행 (호스트 PC)]
+    Cargo->>BuildRs: "PC용으로 build.rs 컴파일 후 즉시 실행"
+    BuildRs->>Clang: "biquad_filter.cpp 크로스 컴파일 (-mcpu=cortex-m7)"
+    Clang-->>BuildRs: "liblegacy_dsp.a (정적 라이브러리) 생성"
+    BuildRs->>Cargo: "cargo:rustc-link-search (라이브러리 위치 통보)"
+    
+    Note over Cargo,Rustc: [2단계: 실제 MCU 펌웨어 링크 (STM32H7)]
+    Cargo->>Rustc: "main.rs + liblegacy_dsp.a 함께 최종 링크"
+    Rustc-->>Dev: "STM32H7 펌웨어 바이너리(ELF) 빌드 완료!"
+```
+
+*(참고: 수백 개 소스 파일로 구성되고 기존 `CMakeLists.txt`가 이미 존재하는 대규모 레거시 C++ 프로젝트의 경우, `build.rs` 안에서 `cmake` 크레이트를 호출하여 기존 CMake 파이프라인을 그대로 감싸서 구동할 수도 있다.)*
 
 ---
 
