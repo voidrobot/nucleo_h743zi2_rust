@@ -31,83 +31,42 @@ Arduino Uno V3 핀 호환 규격으로 NUCLEO-H743ZI2 상단에 직접 적층 �
 ## 2. 소프트웨어 아키텍처 및 기술 스택 (Software Stack)
 
 - **언어 및 런타임**: Rust (`no_std`), Target: `thumbv7em-none-eabihf` (Cortex-M7 with Hardfloat)
-- **임베디드 비동기 프레임워크**: `embassy` (`embassy-stm32`, `embassy-executor`, `embassy-time`, `embassy-sync`)
+- **임베디드 비동기 프레임워크**: `embassy` (`embassy-stm32`, `embassy-executor`, `embassy-time`, `embassy-sync`, `embassy-net`)
 - **하드웨어 추상화 계층 (HAL)**: `embedded-hal` / `embedded-hal-async`
 - **로깅 및 진단 프레임워크**: `defmt` + `defmt-rtt` (고속 바이너리 직렬화 로깅, 제로 UART 오버헤드)
 - **디버깅 및 플래시 도구**: `probe-rs` (`cargo-embed`, `cargo-run`)
 - **메모리 보호 및 안전성**: MPU(Memory Protection Unit) 활성화, DMA-코히런시 관리(L1 Cache 클린/무효화)
+- **ROS 2 미들웨어**: 순수 Rust Zenoh 1.0 UDP 클라이언트 (`rmw_zenoh_cpp` 호환, 별도 중계 데몬 불필요)
 
 ---
 
-## 3. 예제 개발 로드맵 (Example Roadmap)
+## 3. 워크스페이스 구조 (Workspace Architecture)
 
-프로젝트 예제는 기본 하드웨어 검증부터 복합 센서 퓨전 및 비동기 처리까지 단계별로 확장한다.
-
-```mermaid
-flowchart TD
-    Phase0["Step 0: 보드 Bring-up (LED, Clocks, defmt RTT)"] --> Phase1["Step 1: 통신 버스 초기화 (I2C/SPI 버스 스캐너)"]
-    Phase1 --> Phase2["Step 2: 개별 센서 드라이버 연동 (환경 및 모션 센서)"]
-    Phase2 --> Phase3["Step 3: 비동기 다중 센서 오케스트레이션 (Embassy Executor)"]
-    Phase3 --> Phase4["Step 4: 센서 퓨전 및 실시간 추정 (AHRS, Madgwick 필터)"]
-```
-
-### [Step 0] 보드 브링업 및 인프라 (Board Bring-up)
-- **blinky_01**: GPIO 제어를 통한 온보드 사용자 LED 점멸.
-- **rtt_logger_02**: `defmt` 및 RTT 기반 초경량 디버그 로깅 설정.
-- **clock_480mhz_03**: STM32H7 PLL 최적 구성을 통한 최대 클럭(480MHz) 구동 및 VOS0 전압 스케일링.
-
-### [Step 1] 통신 버스 및 브루트포스 탐색 (Bus Interfaces)
-- **i2c_scanner_04**: Arduino 커넥터 I2C 버스(D14/D15 등)에 물린 IKS01A3 전체 센서의 WHO_AM_I 주소 스캔 및 식별.
-- **sensor_whoami_05**: 각 센서 칩셋별 디바이스 식별자 일괄 검증.
-
-### [Step 2] 개별 센서 계측 및 이벤트 감지 (Individual Sensors)
-- **env_lps22hh_06**: LPS22HH 기압 및 고도 환산 데이터 계측.
-- **env_hts221_stts751_07**: 온습도 복합 계측 및 캘리브레이션 레지스터 보정 연산.
-- **imu_lsm6dso_08**: LSM6DSO 6축 가속도/각속도 데이터 동기 획득.
-- **mag_lis2mdl_09**: LIS2MDL 3축 지자기 데이터 계측 및 하드/소프트 아이언 캘리브레이션 기초.
-- **motion_interrupts_10**: LSM6DSO 탭/더블탭/자유낙하/기울기 하드웨어 인터럽트 처리.
-
-### [Step 3] 비동기 다중 센서 오케스트레이션 (Async Embassy Pipeline)
-- **async_i2c_dma_11**: DMA 기반 비차단(Non-blocking) 비동기 I2C 데이터 전송.
-- **sensor_hub_task_12**: Embassy 액터를 활용한 독립 센서 수집 태스크 분리 및 MPSC 채널 기반 데이터 집계.
-
-### [Step 4] 센서 퓨전 및 실시간 자세 추정 (Sensor Fusion & DSP)
-- **ahrs_madgwick_13**: LSM6DSO(가속도/자이로) + LIS2MDL(지자기) 9축 데이터를 결합한 쿼터니언 기반 3차원 자세(Roll/Pitch/Yaw) 추정.
-- **step_counter_mlc_14**: LSM6DSO 내장 머신러닝 코어(MLC) 및 유한상태머신(FSM) 활용 예제.
-
----
-
-## 4. 디렉터리 구조 (Directory Structure)
+본 워크스페이스는 Cargo Workspace 기반 멀티 크레이트 아키텍처로 구성되어 있다:
 
 ```text
 nucleo_h743zi2_rust/
 ├── .cargo/
 │   └── config.toml               # 빌드 타깃(thumbv7em-none-eabihf) 및 러너(probe-rs) 설정
 ├── Cargo.toml                    # Cargo Workspace 선언 및 공통 의존성 관리
-├── crates/                       # 공통 하드웨어 추상화 계층 및 수학 모듈
+├── crates/                       # 공통 라이브러리 크레이트 (순수 알고리즘, 미들웨어, BSP)
 │   ├── nucleo-bsp/               # NUCLEO-H743ZI2 및 X-NUCLEO-IKS01A3 보드 지원 패키지
 │   │   ├── Cargo.toml
-│   │   └── src/lib.rs            # 온보드 핀 매핑(LED/버튼) 및 BoardLeds 구조체
-│   └── so3-inekf/                # 리 군(Lie Group) SO(3) 다양체 및 우불변 InEKF 수학 코어
+│   │   └── src/lib.rs            # 온보드 핀 매핑(LED/버튼/이더넷 RMII) 및 6종 센서 레지스터 상수
+│   ├── so3-inekf/                # 리 군(Lie Group) SO(3) 다양체 및 우불변 InEKF 수학 코어
+│   │   ├── Cargo.toml
+│   │   └── src/                  # Rodrigues Exp/Log 사상, Hat/Vee 연산자, 6D InEKF 필터
+│   └── zenoh-ros2/               # [공용 미들웨어] no_std Zero-Allocation ROS 2 / Zenoh 클라이언트
 │       ├── Cargo.toml
-│       └── src/                  # Rodrigues Exp/Log 사상, Hat/Vee 연산자, 6D InEKF
-├── examples/                     # 단계별 독립 예제 크레이트 모음
+│       └── src/                  # wire(와이어 프레임), cdr(무할당 직렬화), Publisher/Subscriber/ServiceServer
+├── examples/                     # 단계별 독립 실행 예제 바이너리 크레이트
 │   ├── 01_blinky/                # [Step 0] 온보드 3색 LED 순차 점멸 예제
-│   │   ├── Cargo.toml
-│   │   ├── README.md             # 예제 상세 기술 분석서
-│   │   └── src/main.rs
 │   ├── 02_sensor_all_sampling/   # [Step 1] IKS01A3 6종 센서 이종 주기 비동기 샘플링 예제
-│   │   ├── Cargo.toml
-│   │   ├── README.md             # 예제 상세 기술 분석서
-│   │   └── src/main.rs
 │   ├── 03_sensor_web_dashboard/  # [Step 2] LAN8742A RMII 이더넷(DHCP) 및 내장 웹 대시보드 예제
-│   │   ├── Cargo.toml
-│   │   ├── README.md             # 예제 상세 기술 분석서
-│   │   └── src/main.rs
-│   └── 04_ahrs_so3_inekf/        # [Step 3] SO(3) Right-Invariant InEKF AHRS 및 3D 웹 대시보드 예제
-│       ├── Cargo.toml
-│       ├── README.md             # 예제 상세 기술 분석서
-│       └── src/main.rs
+│   ├── 04_ahrs_so3_inekf/        # [Step 3] SO(3) Right-Invariant InEKF AHRS 및 3D 웹 대시보드 예제
+│   ├── 05_mixed_cpp_legacy/      # [Step 4] Rust + C++ 혼합 크로스 컴파일 및 Biquad LPF 브리지 예제
+│   └── 06_ros2_node/             # [Step 5] Zenoh UDP 직통 ROS 2 노드 (100Hz IMU, cmd_vel, set_led 서비스)
+├── history.md                    # 일자별 깃 커밋 히스토리 및 개발 기록
 ├── README.md                     # 본 프로젝트 기술 명세서
 ├── AGENTS.md                     # 에이전트 거버넌스 규칙
 ├── .agents -> void_agent_toolkit/.agents # 에이전트 도구 및 스킬 (심볼릭 링크)
@@ -116,23 +75,37 @@ nucleo_h743zi2_rust/
 
 ---
 
+## 4. 예제 개발 로드맵 및 구성 (Examples)
+
+| 예제 번호 | 패키지명 | 주요 기능 및 기술 스택 | 검증 방식 |
+| :--- | :--- | :--- | :--- |
+| **01_blinky** | `blinky_01` | GPIO 사용자 LED 순차 점멸, `defmt` RTT 초고속 로깅, Embassy 태스크 스케줄링 | 온보드 RTT 실측 |
+| **02_sensor_all_sampling** | `sensor_all_sampling_02` | IKS01A3 6종 센서 허브, 416Hz 오버샘플링/LPF2, 선점형 `InterruptExecutor` 100Hz RT 제어 | 온보드 RTT 실측 (지터 < 1µs) |
+| **03_sensor_web_dashboard** | `sensor_web_dashboard_03` | LAN8742A RMII 이더넷 드라이버, DHCPv4 자동 할당, 포트 80 비동기 웹서버 및 실시간 센서 JSON REST API | `curl` 및 브라우저 검증 |
+| **04_ahrs_so3_inekf** | `ahrs_so3_inekf_04` | $SO(3)$ 우불변 InEKF 9축 자세 추정, ZARU 정지 감지, DWT CPU 사용률 계측, WebGL 3D 대시보드 | `curl` 및 WebGL 3D 뷰어 |
+| **05_mixed_cpp_legacy** | `mixed_cpp_legacy_05` | Rust + C++ 혼합 빌드(`build.rs` + Clang++/G++), Biquad IIR LPF 필터, Safe RAII C-ABI 브리지 | 온보드 RTT 실측 |
+| **06_ros2_node** | `ros2_node_06` | 순수 Rust Zenoh UDP 스택, 100Hz IMU 스트리밍, `cmd_vel` 수신, `set_led` 서비스 응답 (Zero-Loss) | Docker 격리 E2E 하네스 |
+
+---
+
 ## 5. 개발 환경 준비 및 실행 가이드 (Getting Started)
 
 ### ① 하드웨어 연결 확인
 1. NUCLEO-H743ZI2 보드의 ST Zio 커넥터에 X-NUCLEO-IKS01A3 쉴드를 적층 장착한다.
-2. 유선 네트워크 실시간 모니터링 예제(`03`, `04`) 구동 시, 온보드 RJ45 이더넷 포트에 LAN 케이블을 공유기/스위치와 연결한다.
-3. NUCLEO-H743ZI2의 USB ST-LINK 커넥터(CN1)를 PC에 연결한다.
-4. 호스트에서 ST-LINK/V3E 장치 인식을 확인한다:
+2. 유선 이더넷 기반 예제(`03`, `04`, `06`) 구동 시, 온보드 RJ45 포트에 LAN 케이블을 연결한다.
+3. USB ST-LINK 커넥터(CN1)를 PC에 연결하고 장치를 확인한다:
    ```bash
    probe-rs list
    ```
 
 ### ② 예제 빌드 및 실행
+모든 예제는 타깃 툴체인(`thumbv7em-none-eabihf`)을 지정하여 실행한다:
+
 ```bash
 # 01_blinky: 기본 온보드 LED 순차 점멸 예제
 cargo run -p blinky_01
 
-# 02_sensor_all_sampling: IKS01A3 6종 센서 이종 주기(100Hz, 10Hz, 1Hz) 비동기 샘플링 예제
+# 02_sensor_all_sampling: 6종 센서 이종 주기(100Hz, 10Hz, 1Hz) 비동기 샘플링 예제
 cargo run -p sensor_all_sampling_02
 
 # 03_sensor_web_dashboard: LAN8742A 유선 이더넷(DHCP) 및 내장 웹 대시보드 모니터링 예제
@@ -140,9 +113,25 @@ cargo run -p sensor_web_dashboard_03
 
 # 04_ahrs_so3_inekf: SO(3) 우불변 InEKF 자세 추정 및 GPU 가속 3D 웹 대시보드 예제
 cargo run -p ahrs_so3_inekf_04
+
+# 05_mixed_cpp_legacy: Rust + C++ 혼합 크로스 컴파일 및 Biquad LPF 필터링 예제
+cargo run -p mixed_cpp_legacy_05
+
+# 06_ros2_node: 임베디드 ROS 2 노드 펌웨어 플래시
+cargo run -p ros2_node_06
 ```
 
-> **3D 웹 대시보드 접속 안내 (04_ahrs_so3_inekf)**:
-> `ahrs_so3_inekf_04` 실행 시 DHCP 서버로부터 IP(예: `192.168.50.93`)를 자동 할당받는다.
-> - **3D 대시보드 GUI**: 웹 브라우저에서 `http://<할당된_IP>/` 접속 (실시간 3D 보드 모델 물리 회전 동기화)
-> - **REST API**: `curl -s http://<할당된_IP>/api/ahrs` (쿼터니언, 오일러 각, 바이어스, 회전 행렬 JSON)
+### ③ 공용 크레이트 단위 테스트 및 Docker E2E 자동화 검증
+- **`zenoh-ros2` 미들웨어 호스트 단위 테스트**:
+  ```bash
+  cargo test -p zenoh-ros2 --target x86_64-unknown-linux-gnu
+  ```
+- **`so3-inekf` 알고리즘 오라클 차등 테스트**:
+  ```bash
+  cargo test -p so3-inekf --target x86_64-unknown-linux-gnu
+  ```
+- **`06_ros2_node` Docker 격리 E2E 통합 하네스 검증**:
+  ```bash
+  ./examples/06_ros2_node/test_host/run_test.sh
+  ```
+  *(호스트 시스템에 ROS 2를 직접 설치할 필요 없이, Docker 컨테이너 내부에서 100Hz IMU 주기/지터, 매칭 구독자 식별, `set_led` 서비스 응답을 완전 무인으로 자동 검증합니다)*
