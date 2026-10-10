@@ -111,7 +111,7 @@ flowchart TD
 
 ---
 
-## 5. 빌드 및 실행 가이드 (Build & Run Guide)
+## 5. 빌드 및 자동 테스트 가이드  
 
 ### ① 타깃 펌웨어 빌드 및 플래시
 ```bash
@@ -129,4 +129,87 @@ cargo run --bin ros2_node_06
 ```bash
 # 호스트 X11 화면으로 RViz2 3D 디스플레이 구동
 ./examples/06_ros2_node/test_host/rviz2_view.sh
+```
+
+---
+
+## 6. 수동 테스트 가이드 (Manual CLI Inspection)
+
+자동화 검증 스크립트 외에 호스트 OS를 오염시키지 않고 Docker 대화형 셸 내부로 진입하여, 표준 `ros2` CLI 도구를 통해 토픽 스트림을 확인하고 서비스/토픽을 수동으로 조작하는 절차이다.
+
+### ① 대화형 테스트 컨테이너 진입 및 Zenoh 라우터 구동
+호스트 터미널에서 다음 명령을 실행하여 Docker 대화형 셸을 열고, 패키지 빌드 및 Zenoh 라우터 데몬(`rmw_zenohd`)을 백그라운드로 구동한다:
+
+```bash
+# 1. 호스트 머신에서 Docker 대화형 셸 진입 (네트워크 호스트 모드 공유)
+docker run --rm -it --net=host \
+  -v "$(pwd)/examples/06_ros2_node/test_host/src:/ros2_ws/src" \
+  -w /ros2_ws \
+  -e ROS_DOMAIN_ID=0 \
+  -e RMW_IMPLEMENTATION=rmw_zenoh_cpp \
+  ros2_node_test:latest bash
+
+# 2. 컨테이너 내부 환경 설정 및 패키지 빌드
+source /opt/ros/jazzy/setup.bash
+colcon build
+source /ros2_ws/install/setup.bash
+
+# 3. Zenoh 라우터 데몬 백그라운드 구동
+export ZENOH_ROUTER_CONFIG_URI=/ros2_ws/src/host_bringup/config/router_config.json5
+ros2 run rmw_zenoh_cpp rmw_zenohd > /tmp/zenohd.log 2>&1 &
+```
+
+### ② 노드 및 토픽/서비스 목록 확인
+라우터 데몬이 구동되면 NUCLEO-H743ZI2 보드가 발행/수신하는 ROS 2 엔드포인트가 즉시 식별된다:
+
+```bash
+# 1. 활성 토픽 목록 확인
+ros2 topic list
+# 기대 출력:
+# /nucleo/cmd_vel
+# /nucleo/humidity
+# /nucleo/imu/data
+# /nucleo/imu/mag
+# /nucleo/pressure
+# /nucleo/temperature
+
+# 2. 서비스 목록 확인
+ros2 service list
+# 기대 출력:
+# /nucleo/set_led
+```
+
+### ③ 센서 토픽 수신 및 주기 계측 (Echo & Hz)
+```bash
+# 1. 100 Hz 하드 실시간 IMU 쿼터니언/가속도/각속도 데이터 스트림 확인
+ros2 topic echo /nucleo/imu/data
+
+# 2. IMU 데이터 발행 주기 실측 (기대 주기: ~100 Hz, 약 10 ms)
+ros2 topic hz /nucleo/imu/data
+
+# 3. 10 Hz 지자기 센서 데이터 스트림 확인
+ros2 topic echo /nucleo/imu/mag
+
+# 4. 1 Hz 대기압, 온도, 습도 센서 데이터 확인
+ros2 topic echo /nucleo/pressure
+ros2 topic echo /nucleo/temperature
+ros2 topic echo /nucleo/humidity
+```
+
+### ④ 온보드 액추에이터 제어 (Service Call & Pub)
+수동으로 NUCLEO 보드의 온보드 LED를 제어하거나 주행 속도 명령을 전송하여 하드웨어 응답을 검증한다:
+
+```bash
+# 1. 온보드 Green LED (LD1) 점등 서비스 호출
+ros2 service call /nucleo/set_led example_interfaces/srv/SetBool "{data: true}"
+# 기대 응답:
+# response: example_interfaces.srv.SetBool_Response(success=True, message='LED ON')
+
+# 2. 온보드 Green LED (LD1) 소등 서비스 호출
+ros2 service call /nucleo/set_led example_interfaces/srv/SetBool "{data: false}"
+# 기대 응답:
+# response: example_interfaces.srv.SetBool_Response(success=True, message='LED OFF')
+
+# 3. 로봇 주행 속도 명령 발행 (NUCLEO RTT 콘솔에서 실시간 파싱 및 수신 로그 확인)
+ros2 topic pub --once /nucleo/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.2}}"
 ```
