@@ -155,13 +155,16 @@ class AhrsVerifierNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = AhrsVerifierNode()
+    exit_code = 0
     try:
         rclpy.spin(node)
-    except SystemExit:
-        pass
+    except SystemExit as e:
+        exit_code = e.code if e.code is not None else 1
     finally:
         node.destroy_node()
         rclpy.shutdown()
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == '__main__':

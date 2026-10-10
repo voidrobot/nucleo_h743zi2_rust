@@ -26,5 +26,4 @@ defmt-rtt.workspace = true
 panic-probe.workspace = true
 embassy-futures = "0.1.1"
 
-[build-dependencies]
-cc = "1.0"
+

@@ -5,6 +5,7 @@
 
 
 /// Zenoh 프로토콜 메시지 ID
+#[allow(dead_code)]
 pub mod msg_id {
     pub const FRAME: u8 = 0x05;
     pub const PUSH: u8 = 0x1D;
