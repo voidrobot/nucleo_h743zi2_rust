@@ -29,7 +29,9 @@ tags:
 
 ## 2. 시스템 구조 및 데이터 흐름 (Architecture & Data Flow)
 
-### ① NUCLEO-144 온보드 LAN8742A RMII 핀 매핑 규격
+### ① LAN8742A RMII 핀 매핑 (`BoardRmiiPins`)
+
+`nucleo-bsp`의 `BoardRmiiPins`를 통해 9개 RMII 신호 핀을 캡슐화하여 전달한다.
 
 | RMII 신호선 | STM32H743 핀 | 기능 명세 | 비고 |
 | :--- | :--- | :--- | :--- |
@@ -43,11 +45,11 @@ tags:
 | **RMII_TXD1** | `PB13` | 송신 데이터 비트 1 | 패킷 데이터 송신 |
 | **RMII_TX_EN** | `PG11` | 송신 인에이블 신호 | 패킷 전송 활성화 |
 
-### ② 2계층 선점형 실행 및 네트워크 토폴로지 (Pipeline Topology)
+### ② 2계층 선점형 네트워크 토폴로지
 
 ```mermaid
 graph TD
-    subgraph Sensors ["X-NUCLEO-IKS01A3 (I2C1 Fast Mode 400kHz)"]
+    subgraph Sensors ["X-NUCLEO-IKS01A3 (I2C1 Fast Mode I2C_FAST_MODE_HZ)"]
         IMU["LSM6DSO (416Hz ODR + 41.6Hz LPF2)"]
         MAG["LIS2MDL (10Hz Continuous)"]
         ENV["LPS22HH, STTS751, HTS221 (1Hz)"]
@@ -61,7 +63,7 @@ graph TD
     end
 
     subgraph NetworkStack ["이더넷 및 TCP/IP 스택 (embassy-net)"]
-        ETH_PHY["LAN8742A PHY (RMII 9-pin on PA/PB/PC/PG)"]
+        ETH_PHY["LAN8742A PHY (BoardRmiiPins on PA/PB/PC/PG)"]
         Driver["embassy-stm32::eth::Ethernet"]
         DHCP["DHCPv4 Client (자동 IP 할당)"]
         NetStack["embassy_net::Stack"]
@@ -90,15 +92,15 @@ graph TD
 
 ## 3. 핵심 구현 메커니즘 (Key Implementation Mechanisms)
 
-### ① LAN8742A RMII 이더넷 드라이버 및 DHCPv4 클라이언트
-- `embassy-stm32::eth::Ethernet`과 `GenericSMI::new(0)`를 연동하여 온보드 LAN8742A PHY(주소 `0`)를 제어한다.
+### ① RMII 이더넷 드라이버 및 DHCPv4
+- `BoardRmiiPins` 핀셋과 `GenericSMI::new(0)`를 연동하여 온보드 LAN8742A PHY(주소 `0`)를 제어한다.
 - `embassy_net::Config::dhcpv4(Default::default())`를 통해 부팅 즉시 백그라운드에서 DHCP 협상을 개시하며, IP 할당이 완료되면 RTT 콘솔로 즉시 접속 URL(`http://<IP>`)을 안내한다.
 
-### ② 2계층 선점형 실시간성 (Preemptive Real-Time) 보장
+### ② 2계층 하드웨어 선점형 실시간성
 - HTTP 요청 파싱 및 TCP 패킷 송수신은 상대적으로 무거운 작업이므로, **100 Hz IMU 루프(`task_imu_100hz`)**를 ARM Cortex-M7의 고우선순위 인터럽트(`Priority::P6`)에 바인딩된 **`InterruptExecutor`**에 격리 스폰했다.
 - 웹서버가 대용량 HTML을 전송하는 도중에도 10.00ms 주기가 되면 NVIC 인터럽트가 발생하여 **웹서버 코루틴을 즉각 물리적으로 강제 선점(Preemption)**하므로 루프 주기 오차($\Delta t$)가 마이크로초 단위로 엄격히 유지된다.
 
-### ③ 비동기 HTTP 서버 및 `/api/sensors` JSON 엔드포인트
+### ③ 비동기 HTTP 및 `/api/sensors` JSON
 - 포트 80에서 동작하는 스택리스 비동기 `TcpSocket` 리스너를 구현했다.
 - `GET /api/sensors`: 최신 센서 스냅샷을 1024바이트 스택 버퍼(`heapless::String`) 내에서 동적 메모리 할당(Zero-Allocation) 없이 직렬화하여 반환한다:
   ```json
@@ -111,7 +113,7 @@ graph TD
   }
   ```
 
-### ④ 완전 독립형 글래스모피즘(Glassmorphism) 웹 대시보드
+### ④ 독립형 글래스모피즘 웹 대시보드
 - `GET /`: 다크 모드 기반의 반응형 CSS 카드 그리드 UI를 서빙한다.
 - 300ms 주기로 `/api/sensors`를 비동기 호출(`fetch`)하여 IMU 가속도/자이로 센터 바 게이지, 지자기, 기압, 온습도 수치 및 루프 주기 $\Delta t$를 실시간 업데이트한다.
 
@@ -131,7 +133,7 @@ graph TD
 
 ## 5. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+### ① 타깃 크로스 컴파일
 STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 바이너리를 컴파일한다:
 
 ```bash
@@ -142,14 +144,14 @@ cargo build --target thumbv7em-none-eabihf -p sensor_web_dashboard_03
 cargo build --target thumbv7em-none-eabihf -p sensor_web_dashboard_03 --release
 ```
 
-### ② 메모리 풋프린트 점검 (Memory Footprint)
+### ② 메모리 풋프린트 점검
 컴파일된 ELF 바이너리의 Flash 및 RAM 정적 사용량을 확인한다:
 
 ```bash
 cargo size --target thumbv7em-none-eabihf -p sensor_web_dashboard_03 --release -- -A
 ```
 
-### ③ 타깃 보드 플래시 및 실행 (Flash & Run)
+### ③ 타깃 보드 플래시 및 실행
 NUCLEO 보드에 LAN 케이블과 USB(ST-LINK/V3E)를 연결한 뒤 워크스페이스 최상위 루트에서 플래시한다:
 
 ```bash

@@ -42,7 +42,7 @@ flowchart TD
     end
 
     subgraph Runtime["런타임 실행 흐름 (100 Hz RT 센서 루프)"]
-        G["IKS01A3 LSM6DSO 6축 IMU"] -->|"I2C1 DMA 400kHz"| H["Embassy 비동기 루프 (Rust main.rs)"]
+        G["IKS01A3 LSM6DSO 6축 IMU"] -->|"I2C1 I2C_FAST_MODE_HZ DMA"| H["Embassy 비동기 루프 (SAMPLING_RATE_HZ)"]
         H -->|"원시 가속도 데이터 (mg)"| I["SafeBiquadFilter (Rust RAII 래퍼)"]
         I -->|"extern C FFI 무오버헤드 호출"| J["C++ BiquadFilter::process (Direct Form II Transposed)"]
         J -->|"평활화된 가속도 출력 (mg)"| K["defmt / RTT 실시간 로깅 및 LED 하트비트"]
@@ -53,7 +53,7 @@ flowchart TD
 
 ## 3. 핵심 구현 메커니즘 (Key Implementation Mechanisms)
 
-### ① Clang 18 기반 크로스 컴파일 파이프라인 (`build.rs`)
+### ① Clang 18 크로스 컴파일 파이프라인 (`build.rs`)
 - **LLVM 통합 크로스 컴파일**: 호스트 시스템의 `clang++-18`을 호출하여 타깃 아키텍처(`thumbv7em-none-eabihf`, Cortex-M7 Hard-float `fpv5-d16`)로 C++ 소스코드를 컴파일하고 정적 아카이브(`liblegacy_dsp.a`)를 생성한다.
 - **임베디드 C++ 런타임 제거 (`no_std` 호환)**:
   - `-fno-exceptions`: 예외 처리 테이블(`__gxx_personality_v0`) 및 DWARF 언와인딩 정보를 제거한다.
@@ -73,8 +73,12 @@ flowchart TD
   ```
   동적 힙 할당(`malloc`/`new`)을 배제하고, Rust에서 전달받은 스택 메모리 공간에 C++ 객체를 직접 초기화한다.
 
-### ③ Safe RAII Rust Newtype 래퍼 (`src/cpp_bridge.rs`)
+### ③ Safe RAII Rust Newtype 래퍼 및 SSOT 상수 결합
 - **스택 인라인 저장소**: C++ `sizeof(BiquadFilter)`가 28바이트(float 7개)임을 반영하여, Rust 측에서 4바이트 정렬된 32바이트 인라인 버퍼 `[u8; 32]`를 소유한다.
+- **단일 진실 공급원(SSOT) 상수 바인딩**:
+  - `SAMPLING_RATE_HZ = 100`: Embassy `Ticker::every(Duration::from_hz(SAMPLING_RATE_HZ))`와 `SafeBiquadFilter::new_lpf(SAMPLING_RATE_HZ as f32, ...)`가 단일 상수를 공유하여 샘플링 주기 불일치 오차를 방지한다.
+  - `FILTER_CUTOFF_HZ = 5.0`: Butterworth 5Hz 차단 주파수를 명시적으로 선언한다.
+  - `I2C_FAST_MODE_HZ`: BSP 400kHz I2C 클럭을 사용한다.
 - **RAII 메모리 수명주기 보장**:
   ```rust
   #[repr(C, align(4))]
@@ -86,15 +90,15 @@ flowchart TD
 
 ---
 
-## 4. 심층 분석: 빌드 시스템 패러다임 전환 — Makefile/CMake vs Rust `build.rs` (Deep Dive: Build Systems)
+## 4. 빌드 시스템 패러다임: Makefile/CMake vs build.rs
 
-### ① 전통적 C/C++ 빌드 분리 모델과의 차이점
+### ① 전통적 빌드 모델과의 차이점
 전통적 C/C++ 생태계에서는 빌드 명세(Makefile, CMakeLists.txt)와 소스코드(*.c, *.cpp)를 엄격히 분리하는 선언적(Declarative) 방식을 표준으로 유지해 왔다. 반면 Rust는 패키지 루트의 `build.rs` 스크립트를 통해 빌드 전처리 과정을 튜링 완전한 명령형(Imperative) Rust 코드로 직접 제어하는 방식을 표준 규격으로 채택한다.
 
-### ② 단일 툴체인 완결성 (Single Toolchain Completeness)
+### ② 단일 툴체인 완결성
 복수 언어가 혼합된 프로젝트에서 외부 빌드 도구(Make, CMake, Ninja)에 대한 추가 의존성을 제거하고, 오직 `cargo build` 명령어 단일 진입점만으로 의존성 해결, 소스코드 컴파일, 정적 링크를 완결하도록 설계된 메커니즘이다.
 
-### ③ Makefile/CMake vs Rust `build.rs` 비교 매트릭스
+### ③ Makefile/CMake vs build.rs 비교
 
 | 비교 항목 | C/C++ 전통 방식 (Makefile / CMake) | Rust 방식 (`build.rs` + `cc` 크레이트) |
 | :--- | :--- | :--- |
@@ -103,7 +107,7 @@ flowchart TD
 | **타깃 파라미터 동기화** | Cargo 타깃과 Makefile 플래그 간 수동 동기화 필요 (오차 위험) | Cargo의 `TARGET`, `OPT_LEVEL`, `OUT_DIR` 환경변수를 자동 상속 |
 | **플랫폼 일관성** | OS 환경(Linux `make`, Windows `nmake`/`mingw`)별 문법 파편화 | 호스트 OS에 독립적인 표준 Rust API로 일관된 제어 |
 
-### ④ 2단계(Two-Stage) 크로스 컴파일 라이프사이클
+### ④ 2단계 크로스 컴파일 라이프사이클
 
 Cargo는 프로젝트 루트에 `build.rs`가 정의된 경우 개발 호스트 PC에서 `build.rs`를 우선 실행한 뒤, 산출된 정적 라이브러리를 MCU 타깃 링크 단계에 결합한다:
 
@@ -128,25 +132,25 @@ sequenceDiagram
     Rustc-->>Dev: "STM32H7 펌웨어 바이너리(ELF) 생성 완료"
 ```
 
-### ⑤ 생태계 적용 사례 및 대규모 프로젝트 확장 전략
+### ⑤ 생태계 적용 사례 및 확장 전략
 - **표준 라이브러리 채택 사례**: `ring`(C/어셈블리 암호화 루틴), `openssl-sys`, `libsqlite3-sys`, `zstd-sys`, 임베디드 벤더 PAC 등 C/C++ 소스코드를 내장한 주요 Rust 크레이트 전반이 `build.rs` + `cc` 방식을 채택하고 있다.
 - **CMake 기반 대규모 레거시 프로젝트 확장**:
   수백 개의 소스 파일과 복잡한 계층 구조를 갖는 기존 C++ 프로젝트의 경우 `cmake` 크레이트를 활용할 수 있다. `build.rs` 내부에서 `cmake::build("legacy_cpp_dir")`를 호출하면, Cargo가 기존 `CMakeLists.txt` 빌드를 백그라운드에서 구동하고 산출된 정적 아카이브를 자동으로 링커에 전달한다.
 
 ---
 
-## 5. 심층 분석: 임베디드 `no_std` 환경에서의 C++ FFI 메모리 안전성 (Deep Dive: Memory Safety)
+## 5. no_std 환경 C++ FFI 메모리 안전성
 
-### ① C++ 힙 할당(`malloc`/`new`) 배제와 Zero-Allocation 스택 인라인 배치
+### ① C++ 힙 할당 배제 및 스택 인라인 배치
 - **동적 할당 링커 결함 방어**: 베어메탈 마이크로컨트롤러 환경에는 기본 C/C++ 런타임의 동적 힙 알로케이터가 구현되어 있지 않거나 정적 메모리 정책을 강제한다. C++ 소스에서 `new`를 호출할 경우 링커 단계에서 `malloc` 미정의 참조 에러가 발생하거나 런타임 힙 단편화가 초래된다.
 - **스택 인라인 저장소(Inline Storage) 기법**:
   C++ 클래스의 메모리 크기(float 7개 = 28바이트)를 측정하여, Rust 측에서 4바이트 정렬된 32바이트 스택 버퍼(`[u8; 32]`)를 할당하고 포인터를 전달해 객체를 초기화(Placement 방식)한다. 이를 통해 동적 힙 메모리 할당을 완전히 배제하고 실시간 결정론(Deterministic Real-Time)을 확보한다.
 
-### ② C++ 예외(`-fno-exceptions`) 및 RTTI 제거의 필수성
+### ② C++ 예외 및 RTTI 제거
 - **예외 전파 불가(No Exception Crossing)**: C++의 예외 메커니즘(`throw`/`catch`)은 스택 언와인딩 테이블(`eh_frame`)과 C++ 런타임 지원을 필요로 한다. FFI 경계를 넘어 Rust로 예외가 전파될 경우 Rust 런타임은 이를 포착할 수 없어 미정의 동작(Undefined Behavior) 및 시스템 정지가 발생한다.
 - **컴파일 플래그 강제**: 임베디드 C++ 컴파일 시 `-fno-exceptions`, `-fno-rtti`, `-fno-unwind-tables` 플래그를 강제하여 예외 프레임 생성을 배제하고 바이너리 풋프린트를 최소화한다.
 
-### ③ `extern "C"` ABI와 심볼 맹글링(Name Mangling) 방어
+### ③ extern "C" ABI 및 맹글링 방어
 - C++ 컴파일러는 함수 오버로딩과 네임스페이스를 지원하기 위해 심볼 이름을 내부적으로 변환(Name Mangling, 예: `_ZN12BiquadFilter7processEf`)한다.
 - Rust 링커가 C++ 함수 심볼을 정확히 해석할 수 있도록, 모든 FFI 브리지 함수는 `extern "C"` 블록으로 감싸 순수 C-ABI 심볼(`biquad_process`)로 노출해야 한다.
 
@@ -164,21 +168,21 @@ sequenceDiagram
 
 ## 7. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 타깃 릴리스 빌드 (Target Release Build)
+### ① 타깃 릴리스 빌드
 STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 펌웨어를 컴파일한다:
 
 ```bash
 cargo build --target thumbv7em-none-eabihf -p mixed_cpp_legacy_05 --release
 ```
 
-### ② 메모리 풋프린트 점검 (Memory Footprint)
+### ② 메모리 풋프린트 점검
 ```bash
 cargo size --target thumbv7em-none-eabihf -p mixed_cpp_legacy_05 --release -- -A
 ```
 - **Flash (`.text` + `.rodata`)**: 약 **28.0 KB** (C++ 클래스 및 FFI 포함)
 - **RAM (`.data` + `.bss`)**: 약 **33.4 KB**
 
-### ③ ST-LINK/V3E 플래시 및 RTT 실시간 모니터링
+### ③ 타깃 보드 플래시 및 실행
 `.cargo/config.toml`에 설정된 Runner를 통해 빌드, 플래시, RTT 수신을 원클릭으로 실행한다:
 
 ```bash

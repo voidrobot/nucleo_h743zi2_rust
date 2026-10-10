@@ -17,9 +17,9 @@ tags:
 
 # NUCLEO-H743ZI2 SO(3) Right-Invariant InEKF 자세 추정 및 3D 웹 대시보드 (04_ahrs_so3_inekf)
 
-## 1. 개요 및 설계 배경 (Overview & Context)
+## 1. 개요 및 배경 (Overview & Context)
 
-### ① 개발 배경 및 목적
+### ① 배경 및 목적
 본 예제는 NUCLEO-H743ZI2 및 X-NUCLEO-IKS01A3 센서 쉴드 기반으로, 현대 로보틱스와 항공우주 항법 분야의 최전선 이론인 **리 군(Lie Group) $SO(3)$ 다양체 기하학**과 **우불변(Right-Invariant) 확장 칼만 필터(InEKF)**를 결합한 고성능 임베디드 AHRS(Attitude and Heading Reference System) 펌웨어이다.
 
 단순한 오일러 각이나 쿼터니언 기반 필터의 한계(짐벌 락, 이중 커버링, 국소 선형화 왜곡)를 극복하고, 온보드 유선 이더넷(DHCP)을 통해 **브라우저에서 3D 보드 모델의 실시간 물리 회전 및 텔레메트리를 시각화하는 완전 독립형(Zero-CDN) 웹 대시보드**를 제공한다.
@@ -28,9 +28,13 @@ tags:
 1. **야코비(Jacobian)의 상태 독립 상수화 (Invariance)**:
    - 일반 ESKF는 바디 프레임 오차를 취하여 관측 야코비가 현재 추정 자세 $\hat{R}$에 종속된다.
    - 우불변(Right-Invariant) 오차 $\eta = \hat{R} R^{-1} \in SO(3)$를 정의함으로써, 중력 가속도 및 지자기 관측 야코비를 상태와 완전히 무관한 **절대 상수 행렬($-[\mathbf{g}]_\times$, $-[\mathbf{m}]_\times$)**로 변환하여 전역 수렴성(Global Convergence)을 달성한다.
-2. **동적 힙 할당 제로 (Zero-Heap Invariant)**:
+2. **데이터시트 기반 노이즈 공분산 엄밀 유도 (`InEKFConfig`)**:
+   - 임의의 매직 넘버 튜닝값을 전면 배제하고, LSM6DSO ($70\,\mu\text{g}/\sqrt{\text{Hz}}$, $3.8\,\text{mdps}/\sqrt{\text{Hz}}$) 및 LIS2MDL ($3\,\text{mgauss}$) 데이터시트 노이즈 밀도로부터 이산 시간 공분산을 엄밀 유도하는 `InEKFConfig` 팩토리를 적용한다.
+3. **정수 절삭 없는 고정밀 FPU 파이프라인**:
+   - `raw_to_mps2_f32`, `raw_to_mgauss_f32`를 통해 ADC 원시 정수 데이터를 직접 부동소수점 물리량으로 공급하여 필터 추정 지터를 제거한다.
+4. **동적 힙 할당 제로 (Zero-Heap Invariant)**:
    - $SO(3)$ 지수/로그 사상, 6차원 InEKF 상태 전파, $3 \times 3$ 여인수 역행렬, 조셉 형태(Joseph Form) 공분산 갱신을 순수 스택 기반 고정 크기 배열로 완결한다.
-3. **독립형 3D 가상 대시보드 (Zero-CDN)**:
+5. **독립형 3D 가상 대시보드 (Zero-CDN)**:
    - 외부 Three.js나 인터넷 연결 없이 폐쇄망에서도 동작하도록 브라우저 하드웨어 가속 CSS3 3D Transform 기반 3D NUCLEO 보드 모델을 Flash에 내장한다.
 
 ---
@@ -40,16 +44,16 @@ tags:
 ```mermaid
 flowchart TD
     subgraph Hardware ["NUCLEO-H743ZI2 + X-NUCLEO-IKS01A3"]
-        LSM["LSM6DSO (6축 IMU)"] -->|"I2C1 400kHz DMA"| RT_Loop["100Hz RT-IMU 선점 루프 (NVIC CEC P6)"]
-        LIS["LIS2MDL (3축 지자기)"] -->|"I2C1 400kHz"| Mag_Loop["10Hz 지자기 관측 태스크"]
-        ETH["LAN8742A RMII PHY"] <-->|"DHCPv4 / TCP Port 80"| Net_Stack["embassy-net 스택"]
+        LSM["LSM6DSO (6축 IMU)"] -->|"I2C1 I2C_FAST_MODE_HZ DMA"| RT_Loop["100Hz RT-IMU 선점 루프 (NVIC CEC P6)"]
+        LIS["LIS2MDL (3축 지자기)"] -->|"I2C1 I2C_FAST_MODE_HZ"| Mag_Loop["10Hz 지자기 관측 태스크"]
+        ETH["LAN8742A (BoardRmiiPins)"] <-->|"DHCPv4 / TCP Port 80"| Net_Stack["embassy-net 스택"]
     end
 
     subgraph MathCore ["crates/so3-inekf (수학 엔진)"]
-        RT_Loop -->|"각속도 w, 가속도 a"| Still["정지 감지기(Stillness Detector) & ZARU"]
+        RT_Loop -->|"각속도 w, 가속도 a (raw_to_mps2_f32)"| Still["정지 감지기(Stillness Detector) & ZARU"]
         Still -->|"동결/적분 각속도"| Pred["100Hz 관성 적분: R = R * exp(w_unb * dt)"]
-        Still -->|"적응형 노이즈"| Up_Acc["중력 관측 갱신: H = -[g]x (적응형 노이즈)"]
-        Mag_Loop -->|"지자기 m"| Up_Mag["1D Decoupled Yaw 갱신: H = [0,0,1,0,0,0]"]
+        Still -->|"적응형 노이즈"| Up_Acc["중력 관측 갱신: H = -[g]x (InEKFConfig)"]
+        Mag_Loop -->|"지자기 m (raw_to_mgauss_f32)"| Up_Mag["1D Decoupled Yaw 갱신: H = [0,0,1,0,0,0]"]
         Pred --> InEKF["RightInvariantInEKF"]
         Up_Acc --> InEKF
         Up_Mag --> InEKF
@@ -68,12 +72,12 @@ flowchart TD
 
 ## 3. 핵심 구현 메커니즘 (Key Implementation Mechanisms)
 
-### ① 리 군 $SO(3)$ Rodrigues 지수 사상 및 특이점 테일러 전개 (`crates/so3-inekf/src/so3.rs`)
+### ① SO(3) Rodrigues 지수 사상 및 테일러 전개
 회전 벡터 $\boldsymbol{\phi} \in \mathbb{R}^3$로부터 $3 \times 3$ 직교 회전 행렬 $R \in SO(3)$를 유도한다:
 $$\exp(\boldsymbol{\phi}^\wedge) = I + a \boldsymbol{\phi}^\wedge + b (\boldsymbol{\phi}^\wedge)^2$$
 - $\|\boldsymbol{\phi}\| < 10^{-4}$ 근방에서는 테일러 급수($a \approx 1 - \frac{\theta^2}{6}$, $b \approx \frac{1}{2} - \frac{\theta^2}{24}$)를 적용하여 부동소수점 0 나누기(Division-by-Zero)를 원천 차단한다.
 
-### ② 우불변(Right-Invariant) 관측 갱신 및 상수 야코비 (`crates/so3-inekf/src/inekf.rs`)
+### ② 우불변 관측 갱신 및 상수 야코비
 - **공간 투영 혁신**: $\mathbf{z} = \hat{R} y_{sensor} - \mathbf{v}_{ref}$
 - **상수 야코비**: $H = \begin{bmatrix} -[\mathbf{v}_{ref}]_\times & 0_{3 \times 3} \end{bmatrix}$ (상태 $\hat{R}$과 무관)
 - **우불변 매니폴드 상태 복귀 (Manifold Retraction)**:
@@ -82,11 +86,11 @@ $$\exp(\boldsymbol{\phi}^\wedge) = I + a \boldsymbol{\phi}^\wedge + b (\boldsymb
   $$P \leftarrow (I - K H) P (I - K H)^T + K R_{cov} K^T$$
   수치적 비대칭 및 음수 고윳값 전파를 방어하여 장기 가동 안정성을 보장한다.
 
-### ③ 내장 3D 글래스모피즘 웹 대시보드 (`examples/04_ahrs_so3_inekf/src/main.rs`)
+### ③ 내장 3D 웹 대시보드
 - 외부 인터넷망이나 CDN 없이 순수 CSS3 3D Transform(`transform-style: preserve-3d`)을 통해 브라우저 하드웨어 GPU 가속으로 가상 NUCLEO-144 보드를 렌더링한다.
 - 100 Hz 루프에서 추정된 Roll, Pitch, Yaw 및 회전 행렬을 `/api/ahrs`를 통해 실시간 폴링하여 보드의 물리적 기울임과 지연 없이 1:1 회전 동기화한다.
 
-### ④ Embassy Zero-Fork 하드웨어 DWT 유휴 역산 CPU 프로파일링 (Idle-Inversion Profiling)
+### ④ DWT 유휴 역산 CPU 프로파일링
 - **과거 태스크 수동 합산 방식의 결함 극복**: 각 태스크의 실행 시간을 개별 측정하여 합산하는 방식은 숨겨진 백그라운드 작업(이더넷 MAC DMA 인터럽트, 타이머 스케줄러 오버헤드, I2C 버스 대기)을 포착하지 못해 임의의 매직 넘버($T_{base}$)를 남발하게 된다.
 - **`raw::Executor` 기반 Zero-Fork 커스텀 메인 루프**:
   - `#[embassy_executor::main]` 매크로 대신 `#[cortex_m_rt::entry]` 진입점에서 Embassy의 공개 API인 `embassy_executor::raw::Executor::new(core::ptr::null_mut())`를 `singleton!`으로 할당하여 메인 루프를 직접 제어한다.
@@ -115,21 +119,21 @@ $$\exp(\boldsymbol{\phi}^\wedge) = I + a \boldsymbol{\phi}^\wedge + b (\boldsymb
 
 ## 5. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 호스트 유닛 및 nalgebra 오라클 차등 테스트 (수학적 무결성 전수 검증)
+### ① 호스트 오라클 차등 테스트
 알고리즘 및 수학 연산 코어는 호스트 x86_64 타깃으로 `nalgebra`를 레퍼런스 오라클로 활용한 4대 차등 테스트 스위트(총 19개 테스트)를 실행한다:
 
 ```bash
 cargo test --target x86_64-unknown-linux-gnu -p so3-inekf
 ```
 
-- **기본 라이브러리 단위 테스트 (`--lib`)**: $SO(3)$ 지수/로그 왕복, 테일러 전개, 중력 수렴, ZARU 정지 감지, 1D 지자기 디커플링 (6개 통과).
+- **기본 라이브러리 단위 테스트 (`--lib`)**: $SO(3)$ 지수/로그 왕복, 테일러 전개, 중력 수렴, ZARU 정지 감지, 1D 지자기 디커플링, 파라미터 팩토리 검증 (7개 통과).
 - **리 군 불변조건 차등 테스트 (`oracle_lie_group`)**: 200회 무작위 회전 벡터 `So3::exp` $\leftrightarrow$ `nalgebra::Rotation3`, $10^{-9}$ 특이점 방어, `So3::log` 및 `UnitQuaternion` 양방향 복원, $\exp(\text{Ad}_R \omega) == R \exp(\omega) R^T$ 수반 작용, 직교성 및 $\det(R)=1.0$ (6개 통과).
 - **선형대수 정합성 차등 테스트 (`oracle_kalman_algebra`)**: 100회 무작위 양정치 행렬 `invert_3x3` $\leftrightarrow$ `Matrix3::try_inverse()`, 특이행렬 `None` 방어, 조셉 형태(Joseph Form) 공분산 갱신 3중 루프 vs `nalgebra` 대수식 $10^{-4}$ 이내 일치 (3개 통과).
 - **장기 안정성 및 고유값 감사 (`oracle_filter_invariants`)**: 2,000 스텝(20초) 가혹 난수 스트림 하 공분산 대칭성($|P_{ij}-P_{ji}| < 10^{-4}$), 매 100스텝마다 `nalgebra::Cholesky` 양정치성($\lambda_i > 0$) 전수 통과, $10g$ 충격 기각, ZARU 지수 수렴 (3개 통과).
 - **3D 가상 궤적 시뮬레이션 벤치마크 (`oracle_trajectory_sim`)**: 10초(1,000스텝) 3축 정현파 궤적 및 센서 노이즈 하 Ground Truth 대비 자세 추정 오차 RMSE $1.85^\circ$ ($< 3.0^\circ$ 기준 충족) (1개 통과).
 - **타깃 빌드 제로 비용(Zero Cost)**: `nalgebra`는 `[dev-dependencies]`에만 격리 선언되어 타깃 펌웨어 플래시 크기(107 KB) 및 480 MHz 실시간성에 미치는 영향 0%.
 
-### ② 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+### ② 타깃 크로스 컴파일
 STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 펌웨어를 컴파일한다:
 
 ```bash
@@ -140,7 +144,7 @@ cargo build --target thumbv7em-none-eabihf -p ahrs_so3_inekf_04
 cargo build --target thumbv7em-none-eabihf -p ahrs_so3_inekf_04 --release
 ```
 
-### ③ 메모리 풋프린트 점검 (Memory Footprint)
+### ③ 메모리 풋프린트 점검
 컴파일된 ELF 바이너리의 Flash 및 RAM 정적 사용량을 확인한다:
 
 ```bash
@@ -150,7 +154,7 @@ cargo size --target thumbv7em-none-eabihf -p ahrs_so3_inekf_04 --release -- -A
 - RAM 사용량: 약 49 KB (STM32H7 1MB RAM의 약 4.7%)
 - 동적 힙 할당: 0 바이트 (Zero-Heap Invariant 달성)
 
-### ④ 타깃 보드 플래시 및 실행 (Flash & Run)
+### ④ 타깃 보드 플래시 및 실행
 NUCLEO 보드에 LAN 케이블과 USB(ST-LINK/V3E)를 연결한 뒤 워크스페이스 최상위 루트에서 플래시한다:
 
 ```bash
@@ -159,7 +163,7 @@ cargo run -p ahrs_so3_inekf_04
 cargo run -p ahrs_so3_inekf_04 --release
 ```
 
-### ⑤ 3D 대시보드 및 실시간 API 접속 확인
+### ⑤ 대시보드 및 API 접속 확인
 - NUCLEO 보드가 실행되면 DHCP 서버로부터 IP(예: `192.168.50.93`)를 할당받는다.
 - **웹 브라우저 3D 대시보드**: [http://192.168.50.93/](http://192.168.50.93/)
   - 납작한 직육면체 본체와 Body Frame RGB 3축(Red: +X, Green: +Y, Blue: +Z)이 실시간 자세와 1:1 동기화.

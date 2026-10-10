@@ -17,7 +17,7 @@ tags:
 
 # NUCLEO-H743ZI2 Embassy 온보드 LED 순차 점멸 예제 (01_blinky)
 
-## 1. 개요 및 설계 배경 (Overview & Context)
+## 1. 개요 및 배경 (Overview & Context)
 - **목적**: 본 예제는 NUCLEO-H743ZI2 개발 보드의 기본 하드웨어 동작 상태를 검증하는 Step 0 브링업(Bring-up) 펌웨어이다.
 - **해결 과제**:
   - STM32H743ZI MCU의 기본 전원 공급, 클럭 트리 및 GPIO 출력 드라이버의 정상 작동 확인.
@@ -28,7 +28,7 @@ tags:
 
 ## 2. 시스템 구조 및 데이터 흐름 (Architecture & Data Flow)
 
-### ① 하드웨어 핀 매핑 (Hardware Pinout)
+### ① 하드웨어 핀 매핑
 NUCLEO-H743ZI2 보드에 실장된 3개의 사용자 LED를 제어한다.
 
 | 심볼 | LED 명칭 | 실장 색상 | MCU GPIO 핀 | 로직 레벨 | 초기 상태 |
@@ -37,7 +37,7 @@ NUCLEO-H743ZI2 보드에 실장된 3개의 사용자 LED를 제어한다.
 | `leds.yellow` | LED2 | 노란색 (Yellow) | `PE1` | High = ON / Low = OFF | Low (OFF) |
 | `leds.red` | LED3 | 적색 (Red) | `PB14` | High = ON / Low = OFF | Low (OFF) |
 
-### ② 비동기 제어 루프 파이프라인 (Execution Flow)
+### ② 비동기 제어 루프 파이프라인
 
 ```mermaid
 sequenceDiagram
@@ -51,21 +51,21 @@ sequenceDiagram
     loop 순차 점멸 사이클 (1.4초 주기)
         App->>RTT: defmt::info!("Blink Cycle #{}: ...", counter)
         App->>GPIO: PB0 (Green) High
-        App->>Timer: Timer::after_millis(300).await (WFE 슬립)
+        App->>Timer: Timer::after(LED_BLINK_DURATION).await (300ms WFE)
         Timer-->>App: 타이머 만료 인터럽트 복귀
         App->>GPIO: PB0 (Green) Low
 
         App->>GPIO: PE1 (Yellow) High
-        App->>Timer: Timer::after_millis(300).await (WFE 슬립)
+        App->>Timer: Timer::after(LED_BLINK_DURATION).await (300ms WFE)
         Timer-->>App: 타이머 만료 인터럽트 복귀
         App->>GPIO: PE1 (Yellow) Low
 
         App->>GPIO: PB14 (Red) High
-        App->>Timer: Timer::after_millis(300).await (WFE 슬립)
+        App->>Timer: Timer::after(LED_BLINK_DURATION).await (300ms WFE)
         Timer-->>App: 타이머 만료 인터럽트 복귀
         App->>GPIO: PB14 (Red) Low
 
-        App->>Timer: Timer::after_millis(500).await (전체 소등 휴지기)
+        App->>Timer: Timer::after(CYCLE_PAUSE_DURATION).await (500ms 전체 소등)
         Timer-->>App: 복귀
     end
 ```
@@ -74,13 +74,13 @@ sequenceDiagram
 
 ## 3. 핵심 구현 메커니즘 (Key Implementation Mechanisms)
 
-### ① `nucleo-bsp` 기반의 하드웨어 추상화 (`nucleo_bsp::BoardLeds`)
+### ① 하드웨어 추상화 (`nucleo_bsp::BoardLeds`)
 - 개별 예제에서 매번 원시 GPIO 핀 번호(`p.PB0`, `p.PE1`, `p.PB14`)를 하드코딩하지 않고, `BoardLeds::new(...)` 팩토리 메서드를 호출하여 구조체 단위로 제어권을 획득한다.
 - 잘못된 핀 할당이나 중복 점유를 컴파일 타임에 Rust의 소유권(Ownership) 규칙으로 원천 방지한다.
 
-### ② 논블로킹 비동기 타이머 (`Timer::after_millis(...).await`)
-- `cortex_m::asm::delay()`와 같은 비지 웨이트(Busy-wait) 루프는 CPU 코어를 100% 점유하여 전력을 낭비하고 다른 작업을 방해한다.
-- 본 예제는 `embassy-time` 드라이버를 사용하여 대기 시간 동안 Cortex-M7 코어를 저전력 슬립 모드(`WFI`/`WFE`)로 전환하고, 하드웨어 타이머 인터럽트로 복귀하는 협력적 멀티태스킹 방식을 채택한다.
+### ② 논블로킹 타이머 (`Timer::after(...)`)
+- `LED_BLINK_DURATION`(300ms) 및 `CYCLE_PAUSE_DURATION`(500ms) 명명 상수를 선언하여 가독성과 유지보수성을 극대화한다.
+- `cortex_m::asm::delay()`와 같은 비지 웨이트(Busy-wait) 루프 대신 `embassy-time` 드라이버를 사용하여, 대기 시간 동안 Cortex-M7 코어를 저전력 슬립 모드(`WFI`/`WFE`)로 전환하고 하드웨어 타이머 인터럽트로 복귀한다.
 
 ### ③ Zero-UART 고속 RTT 로깅 (`defmt::info!`)
 - 텍스트 포맷팅을 타깃 MCU에서 수행하지 않고, 정수 식별자와 바이트 인자만 SRAM의 RTT 버퍼에 고속 기록한다.
@@ -88,14 +88,14 @@ sequenceDiagram
 
 ---
 
-## 4. 심층 분석: RTT 메커니즘과 Rust `defmt`의 차별성 (Deep Dive: RTT & defmt)
-
-### ① RTT (Real-Time Transfer)의 본질과 C/C++ 생태계
+## 4. RTT 및 defmt 메커니즘 분석
+ 
+### ① RTT 동작 원리 및 C/C++ 환경
 - **기원**: RTT는 SEGGER가 자사 J-Link 디버거를 위해 고안한 통신 규격으로, 언어에 종속되지 않는 하드웨어 디버그 기술이다.
 - **C/C++에서의 사용**: C/C++ 임베디드 프로젝트에서도 `SEGGER_RTT.c` 소스를 포함하여 `SEGGER_RTT_printf(0, "val: %d\r\n", val)` 형태로 UART 대체재로 널리 사용해 왔다.
 - **물리 계층 동작 원리**: 칩 내부 SRAM에 `_SEGGER_RTT` 제어 블록(링 버퍼)을 할당해 두고, ST-LINK나 J-Link 디버거가 SWD(Serial Wire Debug) 버스의 AHB-AP(Access Port)를 통해 CPU를 멈추지 않고(Non-intrusive) 메모리를 직접 읽어 호스트 PC로 스트리밍한다.
 
-### ② C/C++ 일반 RTT vs Rust `defmt` 비교 분석
+### ② C/C++ RTT vs Rust defmt 비교
 
 RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)를 어디에서 수행하는가"**에서 결정적 아키텍처 차이가 발생한다.
 
@@ -108,11 +108,11 @@ RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)�
 | **CPU 실행 지연 시간** | 수 마이크로초 ~ 수십 마이크로초 | **수십 나노초 (수 CPU 사이클)** |
 | **타이밍 왜곡 (Heisenbug)** | 포맷팅 부하로 실시간 루프 교란 가능 | 부하가 극소화되어 타이밍 왜곡 실질적 배제 |
 
-### ③ C/C++ 환경과의 비교 및 Rust의 엔지니어링 혁신
+### ③ Rust 지연 포맷팅 아키텍처
 - **C/C++에서의 포맷팅 지연 시도**: C/C++에서도 Google의 `Pigweed (pw_tokenizer)`나 일부 차량용 트레이서가 유사한 토큰화 방식을 지원하지만, 복잡한 매크로 트릭, 별도의 후처리 파이썬 스크립트, 독립 데몬 프로세스를 빌드 시스템(CMake/GN)에 수동 결합해야 하는 진입장벽이 존재한다.
 - **Rust의 네이티브 통합**: Rust는 컴파일러 단계의 프로시저 매크로(Proc Macro)와 링커 섹션 제어 능력을 바탕으로, 개발자가 추가 툴체인 설정 없이 `Cargo.toml` 의존성과 `probe-rs` 러너만으로 이 고도화된 포맷팅 지연 파이프라인을 원클릭(`cargo run`)으로 사용할 수 있도록 완성도를 끌어올렸다.
 
-### ④ 개발 편의성(Developer Experience) 관점의 워크플로우 통합
+### ④ probe-rs 원스톱 워크플로우
 단순한 물리 채널의 차이를 넘어, 디버깅을 수행하는 개발자 경험(DX)에서 매우 큰 생산성 격차가 존재한다:
 - **전통적인 C/C++ 디버깅 워크플로우**:
   - 펌웨어 컴파일 및 플래시 도구와 RTT 로그 뷰어가 물리적으로 분리되어 있다.
@@ -122,13 +122,13 @@ RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)�
   - `probe-rs` 러너가 모든 과정을 단일 파이프라인으로 흡수 통합했다.
   - 개발자가 `cargo run -p blinky_01` 단 한 줄을 실행하면, 툴체인이 **[1. 코드 빌드 ➔ 2. SWD 타깃 플래시 ➔ 3. 칩 리셋 ➔ 4. SRAM RTT 채널 자동 탐색 ➔ 5. 바이너리 역직렬화 ➔ 6. 컬러 서식 터미널 출력]**을 원스톱으로 처리한다.
 
-### ⑤ 아키텍처적 결론 및 종합 요약
+### ⑤ 아키텍처 요약
 - **공통점**: RTT라는 고속 하드웨어 채널 자체는 언어나 플랫폼에 독립적인 기술이며, C/C++ 프로젝트에서도 완벽하게 동작한다.
 - **차별점 (편의성과 극한의 성능 최적화)**:
   - C/C++ 환경에서는 별도의 도구들을 복합적으로 조합해야 했던 하드웨어 RTT 고속도로를, Rust는 **`probe-rs` 러너를 통해 가장 직관적인 단일 CLI 인터페이스로 추상화**했다.
   - 나아가 단순 전송 채널 활용에 그치지 않고, 컴파일러 레벨의 **`defmt` 지연 포맷팅 기술을 결합하여 실어 나르는 짐(문자열 조합 CPU 연산 및 ROM 플래시 점유) 자체를 호스트 PC로 전면 오프로딩**함으로써 칩의 리소스 부담을 물리적 극한까지 경감시켰다.
 
-### ⑥ 주요 응용: 고속 이벤트 추적 및 고급 프로파일링 (Advanced Profiling Applications)
+### ⑥ 고속 이벤트 추적 및 정밀 프로파일링
 초저지연 RTT와 제로-오버헤드 `defmt`의 결합은 단순한 디버그 텍스트 출력을 넘어, 전통적 UART 환경에서는 불가능했던 정밀 계측 영역을 열어준다:
 
 1. **태스크 간 문맥 전환(Context Switching) 실시간 추적**:
@@ -144,9 +144,9 @@ RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)�
 
 ---
 
-## 5. 심층 분석: 임베디드 비동기 프레임워크 Embassy의 설계 철학 (Deep Dive: Embassy Framework)
+## 5. Embassy 비동기 프레임워크 아키텍처
 
-### ① 등장 배경: 임베디드 동시성 모델의 양대 딜레마
+### ① 임베디드 동시성 모델 한계
 전통적 C/C++ 임베디드 소프트웨어 개발에서는 복수의 센서와 통신 주변장치를 동시에 제어하기 위해 두 가지 방식 중 하나를 선택해야만 했다:
 1. **베어메탈 슈퍼루프 (Superloop & State Machine)**:
    - `while(1)` 루프 안에서 비차단 방식으로 상태 머신을 손수 작성.
@@ -155,7 +155,7 @@ RTT 하드웨어 채널은 동일하지만, **"문자열 서식화(Formatting)�
    - 태스크마다 독립된 스레드를 띄우고 선점형 스케줄링 수행.
    - 단점: **태스크마다 독립된 개별 스택(최소 1~2 KB 이상)을 사전 할당**해야 하므로, RAM이 귀한 MCU에서 수십 KB의 메모리가 스택으로 낭비됨. 또한 스택 크기 예측 실패 시 알 수 없는 **스택 오버플로우(Stack Overflow)**로 인한 시스템 크래시 불안이 상존함.
 
-### ② Embassy의 혁신: 스택리스 코루틴 (Stackless Coroutine)
+### ② 스택리스 코루틴 및 단일 스택 공유
 Embassy는 Rust 언어 고유의 `async/await` 컴파일러 기능을 바탕으로 위 딜레마를 완전히 해소한다:
 - **단일 스택 공유 (Single Main Stack)**:
   - Rust의 `async fn`은 컴파일 시점에 컴파일러에 의해 **초소형 유한상태머신(FSM) 구조체**로 자동 변환된다.
@@ -164,13 +164,13 @@ Embassy는 Rust 언어 고유의 `async/await` 컴파일러 기능을 바탕으�
 - **문맥 전환 오버헤드 최소화**:
   - RTOS처럼 CPU 레지스터 수십 개를 RAM 스택에 푸시/팝하는 무거운 하드웨어 문맥 전환 대신, 단지 상태 머신의 열거형(Enum) 상태 값 하나를 바꾸고 리턴하는 가벼운 함수 호출 수준으로 전환된다.
 
-### ③ 하드웨어 인터럽트와 `await`의 1:1 직결 및 자동 저전력
+### ③ 하드웨어 인터럽트 연동 및 자동 저전력
 Embassy에서는 주변장치 대기 코드가 선형적이면서도 완벽한 비차단(Non-blocking) 및 저전력으로 동작한다:
 
 ```rust
 // Embassy 비동기 I/O 대기 개념
 let p = embassy_stm32::init(Default::default());
-Timer::after_millis(300).await; // 300ms 동안 타이머 만료 대기
+Timer::after(LED_BLINK_DURATION).await; // 300ms 동안 타이머 만료 대기
 ```
 
 - **실행 내부 동작**:
@@ -179,7 +179,7 @@ Timer::after_millis(300).await; // 300ms 동안 타이머 만료 대기
   3. 지정된 하드웨어 타이머 또는 통신 DMA 인터럽트가 발생하는 순간, 칩이 깨어나면서 Rust의 **Waker** 메커니즘을 통해 대기 중이던 태스크만 정확히 `await` 다음 줄부터 즉시 실행을 재개한다.
 - 개발자가 복잡한 인터럽트 서비스 루틴(ISR)과 콜백 함수, 글로벌 플래그 변수를 직접 다루지 않고도 **동기식 코드처럼 읽히는 안전한 비동기 코드**를 완성할 수 있다.
 
-### ④ `embassy_*` 모듈 생태계 구성
+### ④ Embassy 모듈 생태계
 
 | 크레이트 명칭 | 주요 역할 및 기능 | C/C++ 임베디드 대응 개념 |
 | :--- | :--- | :--- |
@@ -189,7 +189,7 @@ Timer::after_millis(300).await; // 300ms 동안 타이머 만료 대기
 | **`embassy-sync`** | 태스크 간 무복사 데이터 통신 프리미티브 (`Channel`, `Mutex`, `Signal`) | FreeRTOS Queue / Semaphore |
 | **`embassy-net`** | 하드웨어 이더넷 및 Wi-Fi 제어를 위한 순수 Rust no_std 네트워크 스택 | LwIP 스택 |
 
-### ⑤ 스케줄링 정책과 실시간성: 협력적 스케줄링 vs 하드웨어 선점 (Scheduling & Preemption)
+### ⑤ 스케줄링 및 실시간성 정책
 
 전통적 선점형 RTOS(FreeRTOS 등)의 관점에서 볼 때, Embassy의 스케줄링 및 실시간성(Real-Time) 정책은 **"소프트웨어 태스크 레벨의 협력적 스케줄링"**과 **"하드웨어 레벨의 강제 선점"**이 결합된 하이브리드 구조를 갖는다:
 
@@ -204,20 +204,20 @@ graph TD
     end
 ```
 
-#### 1. 기본 태스크 정책: `.await` 기반 협력적(Cooperative) 스케줄링
+#### 1. 협력적(Cooperative) 스케줄링
 - **시분할 선점 배제**: SysTick 타이머 틱마다 실행 중인 태스크를 임의의 지점에서 강제로 중단시키는 무차별 선점을 하지 않는다.
 - **자발적 양보(Yield)**: 태스크는 오직 자신이 **`.await`를 호출한 지점에서만** 실행권을 스케줄러에 반납한다.
 - **원자성(Atomicity) 확보와 락 오버헤드 소멸**: `.await`가 없는 연속된 연산 블록은 다른 비동기 태스크가 중간에 끼어들 수 없는 **자연스러운 원자적 실행 구간**이 된다. 따라서 전통적 RTOS에서 공유 변수 하나를 수정할 때마다 Mutex 락을 걸고 푸느라 낭비되던 오버헤드와 우선순위 역전(Priority Inversion) 문제가 근본적으로 제거된다.
 
-#### 2. 하드 리얼타임(Hard Real-Time) 보장: 하드웨어 NVIC 다이렉트 선점
+#### 2. 하드웨어 NVIC 다이렉트 선점
 - 일반 태스크가 `.await` 없이 무거운 연산을 처리하고 있더라도, STM32H743의 하드웨어 인터럽트 컨트롤러(NVIC)는 **그 즉시 해당 태스크를 물리적으로 선점(Preempt)**하여 10 나노초 이내에 인터럽트 핸들러를 실행한다. 긴급 하드웨어 제어는 언제나 하드웨어가 직접 선점한다.
 
-#### 3. 비동기 태스크 간 강제 선점: 다중 우선순위 실행기 (`InterruptExecutor`)
+#### 3. 다중 우선순위 실행기 (`InterruptExecutor`)
 - "비동기(`async`) 태스크 중에서도 특정 제어 루프는 1 kHz로 일반 태스크를 뚫고 강제 선점해야 하는 경우", Embassy는 **`InterruptExecutor`**를 제공한다.
 - STM32H7의 여유 소프트웨어 인터럽트 라인(SWI 등)에 고우선순위 비동기 실행기를 바인딩한다.
 - 이 경우, 하위 우선순위 태스크(예: RTT 로깅)가 `.await`를 부르지 않고 돌고 있더라도, **하드웨어 인터럽트 신호가 트리거되면서 상위 비동기 태스크(예: IMU 필터)가 하위 태스크를 물리적으로 선점**하여 실행된다.
 
-#### 4. FreeRTOS 선점형 모델 vs Embassy 모델 종합 비교
+#### 4. FreeRTOS vs Embassy 비교
 
 | 비교 항목 | FreeRTOS (전통적 선점형 RTOS) | Embassy (현대적 비동기 프레임워크) |
 | :--- | :--- | :--- |
@@ -228,12 +228,11 @@ graph TD
 | **스택 메모리 소모** | 태스크마다 1~2 KB 분할 (스택 오버플로우 위험) | **단일 스택 공유** (태스크당 수십 Byte) |
 | **실시간 지터(Jitter)** | 커널 스케줄러 틱에 의한 지터 존재 | **지터 없는 하드웨어 NVIC 다이렉트 처리** |
 
-
 ---
 
 ## 6. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+### ① 타깃 크로스 컴파일
 STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 명시하여 바이너리를 컴파일한다:
 
 ```bash
@@ -244,14 +243,14 @@ cargo build --target thumbv7em-none-eabihf -p blinky_01
 cargo build --target thumbv7em-none-eabihf -p blinky_01 --release
 ```
 
-### ② 메모리 풋프린트 점검 (Memory Footprint)
+### ② 메모리 풋프린트 점검
 컴파일된 ELF 바이너리의 Flash 및 RAM 섹션별 정적 사용량을 점검한다:
 
 ```bash
 cargo size --target thumbv7em-none-eabihf -p blinky_01 --release -- -A
 ```
 
-### ③ 타깃 보드 플래시 및 RTT 실행 (Flash & Run)
+### ③ 타깃 보드 플래시 및 실행
 NUCLEO-H743ZI2 보드가 USB(ST-LINK/V3E)로 연결된 상태에서 최상위 루트에서 플래시 및 RTT 로깅을 실행한다:
 
 ```bash

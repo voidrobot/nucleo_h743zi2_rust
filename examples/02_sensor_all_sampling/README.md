@@ -81,22 +81,22 @@ graph TD
 
 ## 3. 핵심 구현 메커니즘 (Key Implementation Mechanisms)
 
-### ① `InterruptExecutor`를 통한 하드웨어 선점형 실시간성 (Zero-Jitter Preemption)
+### ① InterruptExecutor 하드웨어 선점
 - STM32H743의 하드웨어 인터럽트(CEC 라인, `Priority::P6`)에 바인딩된 `InterruptExecutor`를 기동한다.
 - 하위 Thread Mode의 태스크(`task_env_1hz`, `task_dashboard_reporter`)가 실행 중이더라도, 10.00ms 주기가 도래하는 순간 ARM Cortex-M7 NVIC가 하드웨어 레벨에서 **하위 태스크를 수 나노초(ns) 만에 강제 선점(Preemption)**하므로 스케줄링 지터를 물리적으로 소멸시킨다.
 
-### ② 버스 락 분할 및 50µs 양보 윈도우(Yield Window)를 통한 우선순위 역전 방어
+### ② 버스 락 분할 및 양보 윈도우 (우선순위 역전 방어)
 - 3개 센서를 계측하는 `task_env_1hz`가 버스를 1~2ms 동안 독점하면 고우선순위 IMU 루프가 블로킹되는 우선순위 역전(Priority Inversion)이 발생한다.
 - 이를 방지하기 위해 센서 1개를 읽을 때마다 I2C 뮤텍스를 즉시 반환하고 `Timer::after_micros(50).await`를 삽입하여, 대기 중인 `task_imu_100hz`가 수십 µs 이내에 버스를 획득할 수 있도록 보장한다.
 
-### ③ 고정밀 $\Delta t$ 실시간 프로파일링 (`Instant::now()`)
+### ③ 실시간 Δt 지터 프로파일링
 - 확장 칼만 필터(EKF)의 상태 적분 공분산 전파($P_{k|k-1} = F_k P_{k-1|k-1} F_k^T + Q_k$)에서 시간 간격 $\Delta t$의 신뢰도를 실증하기 위해 매 틱마다 마이크로초 해상도의 `Instant::now()`를 계측하고 최소/최대 주기를 추적한다.
 
-### ② 400 kHz Fast Mode 버스 대역폭 확보
+### ④ I2C Fast Mode 대역폭 확보 (`I2C_FAST_MODE_HZ`)
 - 100 Hz IMU 샘플링 루프는 10ms마다 LSM6DSO 12바이트(가속도/자이로) 및 LIS2DW12 6바이트 등 총 20바이트 이상의 트랜잭션을 처리해야 한다.
-- 표준 100 kHz I2C에서는 버스 전송 시간에만 2~3ms가 소요되어 버스 포화(Saturation)가 발생하므로, I2C1 버스 속도를 **`Hertz(400_000)` (Fast Mode)**로 설정하여 트랜잭션 점유 시간을 수백 마이크로초(µs) 이하로 단축했다.
+- 표준 100 kHz I2C에서는 버스 전송 시간에만 2~3ms가 소요되어 버스 포화(Saturation)가 발생하므로, I2C1 버스 속도를 BSP 공통 상수 **`I2C_FAST_MODE_HZ` (400 kHz Fast Mode)**로 설정하여 트랜잭션 점유 시간을 수백 마이크로초(µs) 이하로 단축했다.
 
-### ③ 100% 정수 연산 기반의 고속 스케일링
+### ⑤ 고속 정수 스케일링
 - FPU가 탑재된 Cortex-M7이지만, 100 Hz 초고속 루프 내부에서의 부동소수점(`f32`) 연산 오버헤드를 극소화하기 위해 센서 레지스터 원시 바이트를 **고정소수점 및 정수 스케일링(`i32` 중간 연산)**으로 환산한다:
   - LSM6DSO Accel: `(raw * 61) / 1000` (mg)
   - LSM6DSO Gyro: `(raw * 875) / 100000` (dps)
@@ -104,7 +104,7 @@ graph TD
   - LPS22HH Press: `(raw * 10) / 4096` (hPa × 10)
   - STTS751 Temp: `(high * 10) + ((low * 625) / 1000)` (°C × 10)
 
-### ④ 센서 오버샘플링 및 온칩 LPF2 안티-에일리어싱(Anti-Aliasing) DSP 정책
+### ⑥ 센서 오버샘플링 및 온칩 LPF2 DSP
 
 센서 샘플링 시스템에서 MCU 타이머와 센서 내부 ODR 간의 관계는 단순한 수치 매칭 이상의 물리적·신호처리적 고려가 필요하다:
 
@@ -161,7 +161,7 @@ graph LR
 
 ## 5. 빌드 및 실행 가이드 (Build & Run Guide)
 
-### ① 타깃 크로스 컴파일 빌드 (Cross-Compilation Build)
+### ① 타깃 크로스 컴파일
 STM32H743ZI Cortex-M7 타깃 아키텍처(`thumbv7em-none-eabihf`)를 지정하여 바이너리를 컴파일한다:
 
 ```bash
@@ -172,14 +172,14 @@ cargo build --target thumbv7em-none-eabihf -p sensor_all_sampling_02
 cargo build --target thumbv7em-none-eabihf -p sensor_all_sampling_02 --release
 ```
 
-### ② 메모리 풋프린트 점검 (Memory Footprint)
+### ② 메모리 풋프린트 점검
 컴파일된 ELF 바이너리의 Flash 및 RAM 정적 사용량을 확인한다:
 
 ```bash
 cargo size --target thumbv7em-none-eabihf -p sensor_all_sampling_02 --release -- -A
 ```
 
-### ③ 타깃 보드 플래시 및 RTT 실행 (Flash & Run)
+### ③ 타깃 보드 플래시 및 실행
 NUCLEO-H743ZI2에 X-NUCLEO-IKS01A3 센서 쉴드를 장착하고 USB(ST-LINK/V3E)를 연결한 뒤 최상위 루트에서 실행한다:
 
 ```bash
@@ -188,7 +188,7 @@ cargo run -p sensor_all_sampling_02
 cargo run -p sensor_all_sampling_02 --release
 ```
 
-### ④ 실제 타깃 하드웨어 계측 로그 (RTT 터미널 실측 스니펫)
+### ④ RTT 터미널 실측 로그
 
 ```text
 ============================================================
