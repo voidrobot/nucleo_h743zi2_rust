@@ -33,18 +33,24 @@ static inline float local_cosf(float x) {
     return local_sinf(x + (PI * 0.5f));
 }
 
-BiquadFilter::BiquadFilter()
-    : b0_(1.0f), b1_(0.0f), b2_(0.0f), a1_(0.0f), a2_(0.0f), w1_(0.0f), w2_(0.0f) {
+BiquadFilter::BiquadFilter() {
+    b0 = 1.0f;
+    b1 = 0.0f;
+    b2 = 0.0f;
+    a1 = 0.0f;
+    a2 = 0.0f;
+    w1 = 0.0f;
+    w2 = 0.0f;
 }
 
 void BiquadFilter::init_lpf(float sample_rate, float cutoff_freq, float q) {
     if (sample_rate <= 0.0f || cutoff_freq <= 0.0f || q <= 0.0f) {
         reset();
-        b0_ = 1.0f;
-        b1_ = 0.0f;
-        b2_ = 0.0f;
-        a1_ = 0.0f;
-        a2_ = 0.0f;
+        b0 = 1.0f;
+        b1 = 0.0f;
+        b2 = 0.0f;
+        a1 = 0.0f;
+        a2 = 0.0f;
         return;
     }
 
@@ -59,62 +65,57 @@ void BiquadFilter::init_lpf(float sample_rate, float cutoff_freq, float q) {
     float alpha = sin_w / (2.0f * q);
 
     // Audio EQ Cookbook LPF 표준 공식
-    float b0 = (1.0f - cos_w) * 0.5f;
-    float b1 = 1.0f - cos_w;
-    float b2 = (1.0f - cos_w) * 0.5f;
-    float a0 = 1.0f + alpha;
-    float a1 = -2.0f * cos_w;
-    float a2 = 1.0f - alpha;
+    float num_b0 = (1.0f - cos_w) * 0.5f;
+    float num_b1 = 1.0f - cos_w;
+    float num_b2 = (1.0f - cos_w) * 0.5f;
+    float num_a0 = 1.0f + alpha;
+    float num_a1 = -2.0f * cos_w;
+    float num_a2 = 1.0f - alpha;
 
     // a0 정규화
-    float inv_a0 = 1.0f / a0;
-    b0_ = b0 * inv_a0;
-    b1_ = b1 * inv_a0;
-    b2_ = b2 * inv_a0;
-    a1_ = a1 * inv_a0;
-    a2_ = a2 * inv_a0;
+    float inv_a0 = 1.0f / num_a0;
+    b0 = num_b0 * inv_a0;
+    b1 = num_b1 * inv_a0;
+    b2 = num_b2 * inv_a0;
+    a1 = num_a1 * inv_a0;
+    a2 = num_a2 * inv_a0;
 
     reset();
 }
 
 float BiquadFilter::process(float in) {
     // Direct Form II Transposed 구조 (수치적 오버플로우 방어)
-    float out = b0_ * in + w1_;
-    w1_ = b1_ * in - a1_ * out + w2_;
-    w2_ = b2_ * in - a2_ * out;
+    float out = b0 * in + w1;
+    w1 = b1 * in - a1 * out + w2;
+    w2 = b2 * in - a2 * out;
     return out;
 }
 
 void BiquadFilter::reset() {
-    w1_ = 0.0f;
-    w2_ = 0.0f;
+    w1 = 0.0f;
+    w2 = 0.0f;
 }
 
-// --- C-ABI 브리지 구현 (Rust FFI 연동용) ---
+// --- C-ABI 브리지 구현 (BiquadCore 타입 직접 바인딩) ---
 
 extern "C" {
 
-uint32_t biquad_get_instance_size(void) {
-    return static_cast<uint32_t>(sizeof(BiquadFilter));
+void biquad_init_lpf(BiquadCore* filter, float sample_rate, float cutoff_freq, float q) {
+    if (!filter) return;
+    auto* f = static_cast<BiquadFilter*>(filter);
+    f->init_lpf(sample_rate, cutoff_freq, q);
 }
 
-void biquad_init_lpf(void* filter_mem, float sample_rate, float cutoff_freq, float q) {
-    if (!filter_mem) return;
-    // Placement New와 동일하게 기존 메모리 공간에 객체 초기화
-    auto* filter = reinterpret_cast<BiquadFilter*>(filter_mem);
-    filter->init_lpf(sample_rate, cutoff_freq, q);
+float biquad_process(BiquadCore* filter, float input) {
+    if (!filter) return input;
+    auto* f = static_cast<BiquadFilter*>(filter);
+    return f->process(input);
 }
 
-float biquad_process(void* filter_mem, float input) {
-    if (!filter_mem) return input;
-    auto* filter = reinterpret_cast<BiquadFilter*>(filter_mem);
-    return filter->process(input);
-}
-
-void biquad_reset(void* filter_mem) {
-    if (!filter_mem) return;
-    auto* filter = reinterpret_cast<BiquadFilter*>(filter_mem);
-    filter->reset();
+void biquad_reset(BiquadCore* filter) {
+    if (!filter) return;
+    auto* f = static_cast<BiquadFilter*>(filter);
+    f->reset();
 }
 
 } // extern "C"

@@ -1,20 +1,47 @@
 //! C++ 레거시 DSP Biquad 필터에 대한 무오버헤드 C-ABI FFI 및 Safe RAII 래퍼 모듈.
 
-use core::ffi::c_void;
+/// C++ `BiquadCore` 구조체와 1:1로 완벽히 매핑되는 C-ABI 공용 구조체 (28 바이트)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BiquadCore {
+    pub b0: f32,
+    pub b1: f32,
+    pub b2: f32,
+    pub a1: f32,
+    pub a2: f32,
+    pub w1: f32,
+    pub w2: f32,
+}
+
+impl Default for BiquadCore {
+    fn default() -> Self {
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+            w1: 0.0,
+            w2: 0.0,
+        }
+    }
+}
+
+// 컴파일 타임 무비용 크기 및 정렬 정적 단언 (Zero-Cost Static Assertions)
+const _: () = assert!(core::mem::size_of::<BiquadCore>() == 28);
+const _: () = assert!(core::mem::align_of::<BiquadCore>() == 4);
 
 extern "C" {
-    fn biquad_get_instance_size() -> u32;
-    fn biquad_init_lpf(filter_mem: *mut c_void, sample_rate: f32, cutoff_freq: f32, q: f32);
-    fn biquad_process(filter_mem: *mut c_void, input: f32) -> f32;
-    fn biquad_reset(filter_mem: *mut c_void);
+    fn biquad_init_lpf(filter: *mut BiquadCore, sample_rate: f32, cutoff_freq: f32, q: f32);
+    fn biquad_process(filter: *mut BiquadCore, input: f32) -> f32;
+    fn biquad_reset(filter: *mut BiquadCore);
 }
 
 /// C++ `BiquadFilter` 클래스 객체를 동적 힙 할당 없이
-/// 스택/정적 영역에 직접 품는 안전한 RAII Newtype 래퍼.
-#[repr(C, align(4))]
+/// 스택/정적 영역에 직접 소유하는 안전한 RAII Newtype 래퍼.
+#[repr(transparent)]
 pub struct SafeBiquadFilter {
-    // C++ sizeof(BiquadFilter) = 28 bytes를 안전하게 수용하는 32바이트 인라인 버퍼
-    storage: [u8; 32],
+    core: BiquadCore,
 }
 
 impl SafeBiquadFilter {
@@ -24,17 +51,12 @@ impl SafeBiquadFilter {
     /// * `cutoff_freq`: 차단 주파수 (Hz)
     /// * `q`: 품질 팩터 (0.7071f = Butterworth 특성)
     pub fn new_lpf(sample_rate: f32, cutoff_freq: f32, q: f32) -> Self {
-        let mut filter = Self { storage: [0u8; 32] };
+        let mut filter = Self {
+            core: BiquadCore::default(),
+        };
         unsafe {
-            let actual_size = biquad_get_instance_size() as usize;
-            debug_assert!(
-                actual_size <= core::mem::size_of_val(&filter.storage),
-                "C++ BiquadFilter 크기가 Rust 인라인 저장소(32B)를 초과함: {}",
-                actual_size
-            );
-
             biquad_init_lpf(
-                filter.storage.as_mut_ptr() as *mut c_void,
+                &mut filter.core as *mut BiquadCore,
                 sample_rate,
                 cutoff_freq,
                 q,
@@ -46,19 +68,23 @@ impl SafeBiquadFilter {
     /// 단일 샘플을 필터링 처리하여 평활화된 결과값을 반환한다.
     #[inline]
     pub fn process(&mut self, input: f32) -> f32 {
-        unsafe { biquad_process(self.storage.as_mut_ptr() as *mut c_void, input) }
+        unsafe { biquad_process(&mut self.core as *mut BiquadCore, input) }
     }
 
     /// 내부 Direct Form II 딜레이 버퍼 상태를 0으로 리셋한다.
     pub fn reset(&mut self) {
-        unsafe { biquad_reset(self.storage.as_mut_ptr() as *mut c_void) }
+        unsafe { biquad_reset(&mut self.core as *mut BiquadCore) }
+    }
+
+    /// 필터의 내부 C-ABI 코어 상태 참조자를 반환한다.
+    #[inline]
+    pub fn core(&self) -> &BiquadCore {
+        &self.core
     }
 }
 
 impl Drop for SafeBiquadFilter {
     fn drop(&mut self) {
-        // 인라인 저장소이므로 동적 힙 메모리 해제는 불필요하나,
-        // 상태를 안전하게 정리(Zeroing)한다.
         self.reset();
     }
 }
@@ -68,10 +94,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_biquad_instance_size_fits_storage() {
-        let size = unsafe { biquad_get_instance_size() };
-        assert!(size <= 32, "C++ 인스턴스 크기({})가 32바이트 이하이어야 함", size);
-        assert_eq!(size, 28, "C++ float 7개 = 28바이트이어야 함");
+    fn test_biquad_core_size_and_alignment() {
+        assert_eq!(core::mem::size_of::<BiquadCore>(), 28);
+        assert_eq!(core::mem::align_of::<BiquadCore>(), 4);
+        assert_eq!(core::mem::size_of::<SafeBiquadFilter>(), 28);
     }
 
     #[test]
@@ -108,7 +134,7 @@ mod tests {
         }
 
         let attenuation_ratio = max_out / max_in;
-        // 40Hz는 5Hz 차단 주파수보다 훨씬 높으므로 최소 80% 이상 감쇠(비율 < 0.2)되어야 함
+        // 40Hz는 5Hz 차단 주파수보다 훨씬 높으므로 최소 85% 이상 감쇠(비율 < 0.15)되어야 함
         assert!(
             attenuation_ratio < 0.15,
             "고주파 감쇠 실패: ratio = {}",
@@ -123,7 +149,9 @@ mod tests {
             filter.process(50.0);
         }
         filter.reset();
-        // 리셋 직후 0.0 입력 시 출력은 0.0이어야 함
+        assert_eq!(filter.core().w1, 0.0);
+        assert_eq!(filter.core().w2, 0.0);
+
         let out = filter.process(0.0);
         assert_eq!(out, 0.0);
     }
