@@ -1,9 +1,8 @@
-//! # no_std ROS 2 정규 CDR(Common Data Representation) 직렬화기 및 역직렬화기
+//! # no_std ROS 2 정규 CDR(Common Data Representation) 직렬화기 및 역직렬화기 (cdr.rs)
 //!
 //! ROS 2의 표준 CDR 리틀 엔디안(CDR Little-Endian) 규격에 맞추어
 //! 힙 동적 할당 없이(Zero-Heap Allocation) 고정 바이트 슬라이스에 고속으로
 //! 인코딩 및 디코딩을 수행한다.
-
 
 /// CDR 리틀 엔디안 인코딩 헤더 (버전 1, Little Endian, Flags 0)
 pub const CDR_HEADER_LE: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
@@ -21,12 +20,12 @@ impl<'a> CdrWriter<'a> {
         writer
     }
 
+    #[inline(always)]
     pub fn position(&self) -> usize {
         self.offset
     }
 
     pub fn align(&mut self, alignment: usize) {
-        // CDR 정렬은 CDR 헤더 4바이트 이후의 상대 오프셋 기준 정렬
         let relative_offset = self.offset - 4;
         let remainder = relative_offset % alignment;
         if remainder != 0 {
@@ -82,7 +81,7 @@ impl<'a> CdrWriter<'a> {
         let len_with_null = (s.len() + 1) as u32;
         self.write_u32(len_with_null);
         self.write_bytes(s.as_bytes());
-        self.write_u8(0x00); // Null terminator
+        self.write_u8(0x00);
     }
 
     /// std_msgs/msg/Header 직렬화
@@ -140,5 +139,3 @@ impl<'a> CdrReader<'a> {
         }
     }
 }
-
-

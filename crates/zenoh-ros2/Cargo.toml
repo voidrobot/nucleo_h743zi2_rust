@@ -1,0 +1,14 @@
+[package]
+name = "zenoh-ros2"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hardware-agnostic, zero-allocation no_std ROS 2 client for Zenoh (rmw_zenoh_cpp compatible)"
+
+[dependencies]
+defmt = { workspace = true, optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt"]

@@ -1,99 +1,12 @@
 //! # ROS 2 Data Objects & Topic Descriptors (msg.rs)
 //!
-//! ROS 2 표준 메시지 데이터 오브젝트(Imu, Twist, MagneticField 등)와
-//! Zenoh 와이어 프로토콜용 토픽 메타데이터(Key, DDS Type Hash, Liveliness Token)를
-//! 일원화하여 관리하는 SSOT 모듈이다.
+//! NUCLEO 센서 전용 ROS 2 데이터 오브젝트(Imu, MagneticField 등)와
+//! Zenoh 와이어 프로토콜용 토픽 메타데이터(Key, DDS Type Hash, Liveliness Token)를 관리한다.
 
 #![allow(dead_code)]
 
-use crate::cdr::{CdrReader, CdrWriter};
-
-/// `std_msgs/msg/Header`
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Header {
-    pub sec: i32,
-    pub nanosec: u32,
-    pub frame_id: &'static str,
-}
-
-impl Header {
-    pub const fn new(sec: i32, nanosec: u32, frame_id: &'static str) -> Self {
-        Self { sec, nanosec, frame_id }
-    }
-
-    pub fn write_cdr(&self, writer: &mut CdrWriter) {
-        writer.write_header(self.sec, self.nanosec, self.frame_id);
-    }
-}
-
-/// 3차원 기하 벡터 (`geometry_msgs/msg/Vector3`)
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Vector3 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-impl Vector3 {
-    pub const fn new(x: f64, y: f64, z: f64) -> Self {
-        Self { x, y, z }
-    }
-
-    pub fn write_cdr(&self, writer: &mut CdrWriter) {
-        writer.write_f64(self.x);
-        writer.write_f64(self.y);
-        writer.write_f64(self.z);
-    }
-
-    pub fn read_cdr(reader: &mut CdrReader) -> Option<Self> {
-        let x = reader.read_f64()?;
-        let y = reader.read_f64()?;
-        let z = reader.read_f64()?;
-        Some(Self { x, y, z })
-    }
-}
-
-/// 4원수 자세 (`geometry_msgs/msg/Quaternion`)
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Quaternion {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub w: f64,
-}
-
-impl Quaternion {
-    pub const fn new(x: f64, y: f64, z: f64, w: f64) -> Self {
-        Self { x, y, z, w }
-    }
-
-    pub fn write_cdr(&self, writer: &mut CdrWriter) {
-        writer.write_f64(self.x);
-        writer.write_f64(self.y);
-        writer.write_f64(self.z);
-        writer.write_f64(self.w);
-    }
-}
-
-/// `geometry_msgs/msg/Twist`
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Twist {
-    pub linear: Vector3,
-    pub angular: Vector3,
-}
-
-impl Twist {
-    pub const fn new(linear: Vector3, angular: Vector3) -> Self {
-        Self { linear, angular }
-    }
-
-    pub fn decode_cdr(buf: &[u8]) -> Option<Self> {
-        let mut reader = CdrReader::new(buf)?;
-        let linear = Vector3::read_cdr(&mut reader)?;
-        let angular = Vector3::read_cdr(&mut reader)?;
-        Some(Self { linear, angular })
-    }
-}
+use zenoh_ros2::{CdrWriter, RosMessage};
+pub use zenoh_ros2::types::{Header, Quaternion, Twist, Vector3};
 
 /// `sensor_msgs/msg/Imu`
 #[derive(Copy, Clone, Debug)]
@@ -213,34 +126,92 @@ impl RelativeHumidity {
 // Topic Endpoint Metadata (SSOT)
 // ----------------------------------------------------------------------------
 pub mod endpoints {
+    pub const TOKEN_NODE_NAME: &str =
+        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/0/NN/%/%/nucleo_h743zi2";
+
     pub const KEY_IMU_DATA: &str =
         "0/nucleo/imu/data/sensor_msgs::msg::dds_::Imu_/RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b";
+    pub const TOKEN_IMU_DATA: &str =
+        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/11/MP/%/%/nucleo_h743zi2/%nucleo%imu%data/sensor_msgs::msg::dds_::Imu_/RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b/::,:,:,:,,";
 
     pub const KEY_IMU_MAG: &str =
         "0/nucleo/imu/mag/sensor_msgs::msg::dds_::MagneticField_/RIHS01_e80f32f56a20486c9923008fc1a1db07bbb273cbbf6a5b3bfa00835ee00e4dff";
+    pub const TOKEN_IMU_MAG: &str =
+        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/12/MP/%/%/nucleo_h743zi2/%nucleo%imu%mag/sensor_msgs::msg::dds_::MagneticField_/RIHS01_e80f32f56a20486c9923008fc1a1db07bbb273cbbf6a5b3bfa00835ee00e4dff/::,:,:,:,,";
 
     pub const KEY_PRESSURE: &str =
         "0/nucleo/pressure/sensor_msgs::msg::dds_::FluidPressure_/RIHS01_22dfb2b145a0bd5a31a1ac3882a1b32148b51d9b2f3bab250290d66f3595bc32";
+    pub const TOKEN_PRESSURE: &str =
+        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/13/MP/%/%/nucleo_h743zi2/%nucleo%pressure/sensor_msgs::msg::dds_::FluidPressure_/RIHS01_22dfb2b145a0bd5a31a1ac3882a1b32148b51d9b2f3bab250290d66f3595bc32/::,:,:,:,,";
 
     pub const KEY_TEMPERATURE: &str =
         "0/nucleo/temperature/sensor_msgs::msg::dds_::Temperature_/RIHS01_72514a14126ab9f8a9abec974c78e5610a367b59db5da355ff1fb982d5bad4b8";
+    pub const TOKEN_TEMPERATURE: &str =
+        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/14/MP/%/%/nucleo_h743zi2/%nucleo%temperature/sensor_msgs::msg::dds_::Temperature_/RIHS01_72514a14126ab9f8a9abec974c78e5610a367b59db5da355ff1fb982d5bad4b8/::,:,:,:,,";
 
     pub const KEY_HUMIDITY: &str =
-        "0/nucleo/humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_8687c99b4fb393cb2e545e407b5ea7fd0b5d8960bcd849a0f86c544740138839";
+        "0/nucleo/humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_473fa732e600572e9d2243d6860d5bfa4d76241a4980a3ee67bf841eb1d7f35b";
+    pub const TOKEN_HUMIDITY: &str =
+        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/15/MP/%/%/nucleo_h743zi2/%nucleo%humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_473fa732e600572e9d2243d6860d5bfa4d76241a4980a3ee67bf841eb1d7f35b/::,:,:,:,,";
 
     pub const KEY_CMD_VEL: &str =
         "0/nucleo/cmd_vel/geometry_msgs::msg::dds_::Twist_/RIHS01_9c45bf16fe0983d80e3cfe750d6835843d265a9a6c46bd2e609fcddde6fb8d2a";
-
     pub const TOKEN_CMD_VEL: &str =
         "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/16/MS/%/%/nucleo_h743zi2/%nucleo%cmd_vel/geometry_msgs::msg::dds_::Twist_/RIHS01_9c45bf16fe0983d80e3cfe750d6835843d265a9a6c46bd2e609fcddde6fb8d2a/::,:,:,:,,";
 
     pub const TOPIC_LIVELINESS_TOKENS: [&str; 7] = [
-        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/0/NN/%/%/nucleo_h743zi2",
-        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/11/MP/%/%/nucleo_h743zi2/%nucleo%imu%data/sensor_msgs::msg::dds_::Imu_/RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b/::,:,:,:,,",
-        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/12/MP/%/%/nucleo_h743zi2/%nucleo%imu%mag/sensor_msgs::msg::dds_::MagneticField_/RIHS01_e80f32f56a20486c9923008fc1a1db07bbb273cbbf6a5b3bfa00835ee00e4dff/::,:,:,:,,",
-        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/13/MP/%/%/nucleo_h743zi2/%nucleo%pressure/sensor_msgs::msg::dds_::FluidPressure_/RIHS01_22dfb2b145a0bd5a31a1ac3882a1b32148b51d9b2f3bab250290d66f3595bc32/::,:,:,:,,",
-        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/14/MP/%/%/nucleo_h743zi2/%nucleo%temperature/sensor_msgs::msg::dds_::Temperature_/RIHS01_72514a14126ab9f8a9abec974c78e5610a367b59db5da355ff1fb982d5bad4b8/::,:,:,:,,",
-        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/15/MP/%/%/nucleo_h743zi2/%nucleo%humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_8687c99b4fb393cb2e545e407b5ea7fd0b5d8960bcd849a0f86c544740138839/::,:,:,:,,",
+        TOKEN_NODE_NAME,
+        TOKEN_IMU_DATA,
+        TOKEN_IMU_MAG,
+        TOKEN_PRESSURE,
+        TOKEN_TEMPERATURE,
+        TOKEN_HUMIDITY,
         TOKEN_CMD_VEL,
     ];
 }
+
+impl RosMessage for Imu {
+    const TOPIC_KEY: &'static str = endpoints::KEY_IMU_DATA;
+    const LIVELINESS_TOKEN: &'static str = endpoints::TOKEN_IMU_DATA;
+
+    fn encode_cdr(&self, buf: &mut [u8]) -> usize {
+        self.encode_cdr(buf)
+    }
+}
+
+impl RosMessage for MagneticField {
+    const TOPIC_KEY: &'static str = endpoints::KEY_IMU_MAG;
+    const LIVELINESS_TOKEN: &'static str = endpoints::TOKEN_IMU_MAG;
+
+    fn encode_cdr(&self, buf: &mut [u8]) -> usize {
+        self.encode_cdr(buf)
+    }
+}
+
+impl RosMessage for FluidPressure {
+    const TOPIC_KEY: &'static str = endpoints::KEY_PRESSURE;
+    const LIVELINESS_TOKEN: &'static str = endpoints::TOKEN_PRESSURE;
+
+    fn encode_cdr(&self, buf: &mut [u8]) -> usize {
+        self.encode_cdr(buf)
+    }
+}
+
+impl RosMessage for Temperature {
+    const TOPIC_KEY: &'static str = endpoints::KEY_TEMPERATURE;
+    const LIVELINESS_TOKEN: &'static str = endpoints::TOKEN_TEMPERATURE;
+
+    fn encode_cdr(&self, buf: &mut [u8]) -> usize {
+        self.encode_cdr(buf)
+    }
+}
+
+impl RosMessage for RelativeHumidity {
+    const TOPIC_KEY: &'static str = endpoints::KEY_HUMIDITY;
+    const LIVELINESS_TOKEN: &'static str = endpoints::TOKEN_HUMIDITY;
+
+    fn encode_cdr(&self, buf: &mut [u8]) -> usize {
+        self.encode_cdr(buf)
+    }
+}
+

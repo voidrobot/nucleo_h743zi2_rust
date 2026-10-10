@@ -1,11 +1,9 @@
-//! # no_std Zenoh 1.0 초경량 와이어 프로토콜 인코더 및 디코더
+//! # no_std Zenoh 1.0 초경량 와이어 프로토콜 인코더 및 디코더 (wire.rs)
 //!
 //! Eclipse Zenoh 1.0 프로토콜 규격에 따라 FRAME(Transport) -> PUSH(Network) -> PUT(Data)
 //! 계층 구조를 힙 동적 할당 없이(Zero-Heap Allocation) 고정 버퍼에서 직접 인코딩 및 디코딩한다.
 
-
 /// Zenoh 프로토콜 메시지 ID
-#[allow(dead_code)]
 pub mod msg_id {
     pub const FRAME: u8 = 0x05;
     pub const PUSH: u8 = 0x1D;
@@ -248,7 +246,6 @@ impl ZenohWire {
         key_expr: &str,
     ) -> usize {
         let mut offset = 0;
-        // FRAME
         buf[offset] = msg_id::FRAME;
         offset += 1;
         offset += encode_vle(seq as usize, &mut buf[offset..]);
@@ -280,7 +277,6 @@ impl ZenohWire {
         key_expr: &str,
     ) -> usize {
         let mut offset = 0;
-        // FRAME
         buf[offset] = msg_id::FRAME;
         offset += 1;
         offset += encode_vle(seq as usize, &mut buf[offset..]);
@@ -335,11 +331,9 @@ impl ZenohWire {
 
         match msg_type & 0x1F {
             msg_id::PUSH => {
-                // WireExpr ID
                 let (_id, vle_len) = decode_vle(&buf[offset..])?;
                 offset += vle_len;
 
-                // Key Expression 파싱
                 let key_expr = if (msg_type & 0x20) != 0 {
                     let (k_len, vle_len) = decode_vle(&buf[offset..])?;
                     offset += vle_len;
@@ -353,7 +347,6 @@ impl ZenohWire {
                     ""
                 };
 
-                // PUT Sub-message 파싱
                 if offset >= buf.len() || (buf[offset] & 0x1F) != msg_id::PUT {
                     return None;
                 }
@@ -369,15 +362,12 @@ impl ZenohWire {
                 Some((msg_id::PUSH, key_expr, 0, payload))
             }
             msg_id::REQUEST => {
-                // Query ID 파싱
                 let (q_id, vle_len) = decode_vle(&buf[offset..])?;
                 offset += vle_len;
 
-                // WireExpr ID
                 let (_id, vle_len) = decode_vle(&buf[offset..])?;
                 offset += vle_len;
 
-                // Key Expression 파싱
                 let key_expr = if (msg_type & 0x20) != 0 {
                     let (k_len, vle_len) = decode_vle(&buf[offset..])?;
                     offset += vle_len;
@@ -391,7 +381,6 @@ impl ZenohWire {
                     ""
                 };
 
-                // Payload 파싱
                 let payload = if offset < buf.len() {
                     &buf[offset..]
                 } else {
@@ -406,13 +395,13 @@ impl ZenohWire {
 
     /// Zenoh Transport 계층 세션 개설 메시지 (InitSyn) 생성 (22바이트)
     pub fn build_init_syn(buf: &mut [u8], zid: &[u8; 16]) -> usize {
-        buf[0] = 0x01 | 0x40; // _Z_MID_T_INIT (0x01) | _Z_FLAG_T_INIT_S (0x40)
-        buf[1] = 0x09; // Z_PROTO_VERSION (0x09)
-        buf[2] = 0xF2; // whatami=Client (0x02) | (15 << 4 = 0xF0)
+        buf[0] = 0x01 | 0x40;
+        buf[1] = 0x09;
+        buf[2] = 0xF2;
         buf[3..19].copy_from_slice(zid);
-        buf[19] = 0x0A; // (seq_num_res=2) | (req_id_res=2 << 2 = 8) => 0x0A
-        buf[20] = 0x00; // batch_size LSB (2048 = 0x0800)
-        buf[21] = 0x08; // batch_size MSB
+        buf[19] = 0x0A;
+        buf[20] = 0x00;
+        buf[21] = 0x08;
         22
     }
 
@@ -422,7 +411,6 @@ impl ZenohWire {
             return None;
         }
         let header = buf[0];
-        // _Z_MID_T_INIT (0x01) & _Z_FLAG_T_INIT_A (0x20)
         if (header & 0x1F) != 0x01 || (header & 0x20) == 0 {
             return None;
         }
@@ -433,7 +421,6 @@ impl ZenohWire {
         let zidlen = (((cbyte >> 4) & 0x0F) + 1) as usize;
         let mut offset = 3 + zidlen;
 
-        // 라우터가 S 플래그(_Z_FLAG_T_INIT_S = 0x40)를 포함한 경우 3바이트 (res 1B + batch_size 2B) 건너뜀
         if (header & 0x40) != 0 {
             offset += 3;
         }
@@ -442,7 +429,6 @@ impl ZenohWire {
             return None;
         }
 
-        // Cookie slice 디코딩 (vle_len + cookie bytes)
         let (cookie_len, vle_len) = decode_vle(&buf[offset..])?;
         offset += vle_len;
         if offset + cookie_len > buf.len() {
@@ -453,15 +439,12 @@ impl ZenohWire {
 
     /// Zenoh Transport 계층 세션 확립 메시지 (OpenSyn) 생성
     pub fn build_open_syn(buf: &mut [u8], cookie: &[u8]) -> usize {
-        buf[0] = 0x02 | 0x40; // _Z_MID_T_OPEN (0x02) | _Z_FLAG_T_OPEN_T (0x40)
+        buf[0] = 0x02 | 0x40;
         let mut offset = 1;
 
-        // lease: 10초
         offset += encode_vle(10, &mut buf[offset..]);
-        // initial_sn: 0
         offset += encode_vle(0, &mut buf[offset..]);
 
-        // cookie
         offset += encode_vle(cookie.len(), &mut buf[offset..]);
         buf[offset..offset + cookie.len()].copy_from_slice(cookie);
         offset += cookie.len();
@@ -475,7 +458,6 @@ impl ZenohWire {
             return false;
         }
         let header = buf[0];
-        // _Z_MID_T_OPEN (0x02) & _Z_FLAG_T_OPEN_A (0x20)
         (header & 0x1F) == 0x02 && (header & 0x20) != 0
     }
 }

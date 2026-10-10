@@ -6,10 +6,8 @@
 #![no_std]
 #![no_main]
 
-mod cdr;
 mod msg;
 mod srv;
-mod zenoh_wire;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use defmt::*;
 use defmt_rtt as _;
@@ -24,18 +22,19 @@ use embassy_stm32::interrupt::{self, InterruptExt, Priority};
 use embassy_stm32::peripherals::ETH;
 use embassy_stm32::{bind_interrupts, eth, i2c, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker};
 use embassy_futures::select::{select, Either};
 use panic_probe as _;
 use static_cell::StaticCell;
 
+use zenoh_ros2::{DiscoveryRegistry, Publisher, ServiceServer, Subscriber, ZenohWire};
 use msg::{endpoints as msg_endpoints, FluidPressure, Header, Imu, MagneticField, Quaternion, RelativeHumidity, Temperature, Twist, Vector3};
-use srv::{endpoints as srv_endpoints, set_bool};
+use srv::{set_bool, SetBoolService};
 use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::{BoardRmiiPins, I2C_FAST_MODE_HZ};
 use so3_inekf::inekf::RightInvariantInEKF;
-use zenoh_wire::{msg_id, ZenohWire};
 
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
@@ -140,8 +139,51 @@ static IMU_SNAPSHOT: Mutex<CriticalSectionRawMutex, ImuSnapshot> = Mutex::new(Im
 });
 
 // ----------------------------------------------------------------------------
-// 4. 태스크 정의
+// 4. ROS 2 비동기 채널 정의
 // ----------------------------------------------------------------------------
+/// `/nucleo/cmd_vel` 비동기 워커 채널
+static CMD_VEL_CHANNEL: Channel<CriticalSectionRawMutex, Twist, 2> = Channel::new();
+
+/// `/nucleo/set_led` 서비스 요청 채널 (Request, QueryId)
+static SET_LED_REQ_CHANNEL: Channel<CriticalSectionRawMutex, (set_bool::Request, u32), 2> = Channel::new();
+
+/// `/nucleo/set_led` 서비스 응답 채널 (Response, QueryId)
+static SET_LED_RES_CHANNEL: Channel<CriticalSectionRawMutex, (set_bool::Response, u32), 2> = Channel::new();
+
+// ----------------------------------------------------------------------------
+// 5. 태스크 정의
+// ----------------------------------------------------------------------------
+
+/// `/nucleo/cmd_vel` ROS 2 주행 속도 명령 수신 전용 워커 태스크 (독립 loop 소유)
+#[embassy_executor::task]
+async fn task_sub_cmd_vel() {
+    info!("[Sub CmdVel] /nucleo/cmd_vel 서브스크라이버 태스크 시작 (독립 loop)");
+    loop {
+        let cmd = CMD_VEL_CHANNEL.receive().await;
+        info!("[ROS2 cmd_vel] linear.x={=f64} m/s, angular.z={=f64} rad/s", cmd.linear.x, cmd.angular.z);
+    }
+}
+
+/// `/nucleo/set_led` ROS 2 서비스 처리 전용 워커 태스크 (독립 loop 소유)
+#[embassy_executor::task]
+async fn task_srv_set_led() {
+    info!("[Srv SetLed] /nucleo/set_led 서비스 서버 태스크 시작 (독립 loop)");
+    loop {
+        let (req, q_id) = SET_LED_REQ_CHANNEL.receive().await;
+        let mut led_guard = USER_LED.lock().await;
+        if let Some(ref mut led) = *led_guard {
+            if req.data {
+                led.set_high();
+            } else {
+                led.set_low();
+            }
+        }
+        info!("[ROS2 Service] /nucleo/set_led -> data={=bool} 처리 완료", req.data);
+
+        let res = set_bool::Response::new(true, if req.data { "LED ON" } else { "LED OFF" });
+        SET_LED_RES_CHANNEL.send((res, q_id)).await;
+    }
+}
 
 /// 100 Hz 하드 실시간 선점 인터럽트 태스크 (Priority::P6)
 #[embassy_executor::task]
@@ -311,12 +353,6 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
     let mut att_buf = [0u8; 33];
 
     let mut frame_seq: u32 = 0;
-    let mut seq_imu: i64 = 0;
-    let mut seq_mag: i64 = 0;
-    let mut seq_press: i64 = 0;
-    let mut seq_temp: i64 = 0;
-    let mut seq_hum: i64 = 0;
-
     let mut ticker_100hz = Ticker::every(Duration::from_hz(100));
     let mut div_10hz: u8 = 0;
     let mut div_1hz: u16 = 0;
@@ -339,6 +375,28 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
     gid_temp[15] = 0x04;
     let mut gid_hum = zid_bytes;
     gid_hum[15] = 0x05;
+
+    // 캡슐화된 ROS 2 Publisher 및 Subscriber 객체 생성 (시퀀스 카운터 은닉)
+    let mut pub_imu = Publisher::<Imu>::new(gid_imu);
+    let mut pub_mag = Publisher::<MagneticField>::new(gid_mag);
+    let mut pub_press = Publisher::<FluidPressure>::new(gid_press);
+    let mut pub_temp = Publisher::<Temperature>::new(gid_temp);
+    let mut pub_hum = Publisher::<RelativeHumidity>::new(gid_hum);
+    let sub_cmd_vel = Subscriber::<Twist>::new();
+    let srv_set_led = ServiceServer::<SetBoolService>::new(1, zid_bytes);
+
+    // 8종 엔드포인트 Liveliness Token 통합 관리 (Zero-Touch Discovery: 각 엔티티의 토큰 자율 등록)
+    let liveliness_tokens = [
+        msg_endpoints::TOKEN_NODE_NAME,
+        pub_imu.liveliness_token(),
+        pub_mag.liveliness_token(),
+        pub_press.liveliness_token(),
+        pub_temp.liveliness_token(),
+        pub_hum.liveliness_token(),
+        sub_cmd_vel.liveliness_token(),
+        srv_set_led.liveliness_token(),
+    ];
+    let discovery = DiscoveryRegistry::new(&liveliness_tokens);
 
     let mut session_established = false;
     let mut last_rx_instant = Instant::now();
@@ -363,7 +421,7 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                 div_10hz = (div_10hz + 1) % 10;
                 div_1hz = (div_1hz + 1) % 100;
 
-                // 1. 100 Hz IMU 데이터 발행
+                // 1. 100 Hz IMU 데이터 발행 (캡슐화된 Publisher 사용)
                 let snap = *IMU_SNAPSHOT.lock().await;
                 let imu_msg = Imu {
                     header: Header::new(snap.sec, snap.nanosec, "imu_link"),
@@ -374,16 +432,12 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                     linear_acceleration: Vector3::new(snap.linear_accel[0], snap.linear_accel[1], snap.linear_accel[2]),
                     linear_acceleration_covariance: snap.cov_linear_accel,
                 };
-                let cdr_len = imu_msg.encode_cdr(&mut cdr_buf);
-
                 frame_seq = frame_seq.wrapping_add(1);
-                seq_imu = seq_imu.wrapping_add(1);
                 let time_ns = (snap.sec as i64) * 1_000_000_000 + (snap.nanosec as i64);
-                ZenohWire::build_rmw_attachment(&mut att_buf, seq_imu, time_ns, &gid_imu);
-                let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_IMU_DATA, Some(&att_buf), &cdr_buf[..cdr_len]);
+                let frame_len = pub_imu.build_frame(&imu_msg, time_ns, frame_seq, &mut frame_buf, &mut att_buf, &mut cdr_buf);
                 let _ = socket.send_to(&frame_buf[..frame_len], remote_host).await;
 
-                // 2. 10 Hz 지자기 데이터 발행
+                // 2. 10 Hz 지자기 데이터 발행 (캡슐화된 Publisher 사용)
                 if div_10hz == 0 {
                     let env = *ENV_DATA.lock().await;
                     let mag_msg = MagneticField::new(
@@ -391,48 +445,36 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                         Vector3::new(env.mag_tesla[0], env.mag_tesla[1], env.mag_tesla[2]),
                         cov_mag,
                     );
-                    let cdr_len = mag_msg.encode_cdr(&mut cdr_buf);
                     frame_seq = frame_seq.wrapping_add(1);
-                    seq_mag = seq_mag.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_mag, time_ns, &gid_mag);
-                    let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_IMU_MAG, Some(&att_buf), &cdr_buf[..cdr_len]);
+                    let frame_len = pub_mag.build_frame(&mag_msg, time_ns, frame_seq, &mut frame_buf, &mut att_buf, &mut cdr_buf);
                     let _ = socket.send_to(&frame_buf[..frame_len], remote_host).await;
                 }
 
-                // 3. 1 Hz 기압, 온도, 습도 발행, Liveliness Token 갱신, 라우터 생존성 감시
+                // 3. 1 Hz 기압, 온도, 습도 발행 및 Liveliness Token 일괄 갱신
                 if div_1hz == 0 {
                     let env = *ENV_DATA.lock().await;
                     let hdr = Header::new(snap.sec, snap.nanosec, "imu_link");
 
                     // Pressure
                     let press_msg = FluidPressure::new(hdr, env.pressure_pa, 0.0);
-                    let p_len = press_msg.encode_cdr(&mut cdr_buf);
                     frame_seq = frame_seq.wrapping_add(1);
-                    seq_press = seq_press.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_press, time_ns, &gid_press);
-                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_PRESSURE, Some(&att_buf), &cdr_buf[..p_len]);
+                    let f_len = pub_press.build_frame(&press_msg, time_ns, frame_seq, &mut frame_buf, &mut att_buf, &mut cdr_buf);
                     let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
 
                     // Temperature
                     let temp_msg = Temperature::new(hdr, env.temperature_c, 0.0);
-                    let t_len = temp_msg.encode_cdr(&mut cdr_buf);
                     frame_seq = frame_seq.wrapping_add(1);
-                    seq_temp = seq_temp.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_temp, time_ns, &gid_temp);
-                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_TEMPERATURE, Some(&att_buf), &cdr_buf[..t_len]);
+                    let f_len = pub_temp.build_frame(&temp_msg, time_ns, frame_seq, &mut frame_buf, &mut att_buf, &mut cdr_buf);
                     let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
 
                     // Humidity
                     let hum_msg = RelativeHumidity::new(hdr, env.humidity_ratio, 0.0);
-                    let h_len = hum_msg.encode_cdr(&mut cdr_buf);
                     frame_seq = frame_seq.wrapping_add(1);
-                    seq_hum = seq_hum.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_hum, time_ns, &gid_hum);
-                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_HUMIDITY, Some(&att_buf), &cdr_buf[..h_len]);
+                    let f_len = pub_hum.build_frame(&hum_msg, time_ns, frame_seq, &mut frame_buf, &mut att_buf, &mut cdr_buf);
                     let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
 
-                    // 4. ROS 2 Jazzy Liveliness Token 정기 발행 (1 Hz: 토픽 7종 + 서비스 1종)
-                    for (i, &lv) in msg_endpoints::TOPIC_LIVELINESS_TOKENS.iter().enumerate() {
+                    // 4. ROS 2 Jazzy Liveliness Token 정기 발행 (DiscoveryRegistry 8종 일괄 순회)
+                    for (i, &lv) in discovery.tokens().iter().enumerate() {
                         frame_seq = frame_seq.wrapping_add(1);
                         let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, (i + 10) as u32, lv);
                         let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
@@ -441,13 +483,6 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                         let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, lv, &[]);
                         let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
                     }
-                    frame_seq = frame_seq.wrapping_add(1);
-                    let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, 21, srv_endpoints::TOKEN_SET_LED);
-                    let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
-
-                    frame_seq = frame_seq.wrapping_add(1);
-                    let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, srv_endpoints::TOKEN_SET_LED, &[]);
-                    let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
 
                     // 5. 라우터 생존성 감시 및 자동 재연결(Auto-Reconnect) 트리거
                     let elapsed = Instant::now().duration_since(last_rx_instant);
@@ -457,10 +492,16 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                         let init_len = ZenohWire::build_init_syn(&mut frame_buf, &zid_bytes);
                         let _ = socket.send_to(&frame_buf[..init_len], remote_host).await;
                     } else if elapsed > Duration::from_secs(1) {
-                        // 1초 이상 무수신 시 라우터 생존 확인용 InitSyn 프로브 전송
                         let init_len = ZenohWire::build_init_syn(&mut frame_buf, &zid_bytes);
                         let _ = socket.send_to(&frame_buf[..init_len], remote_host).await;
                     }
+                }
+
+                // 4. 워커 태스크에서 생성된 서비스 응답 전송
+                while let Ok((res, q_id)) = SET_LED_RES_CHANNEL.try_receive() {
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let rep_len = srv_set_led.build_reply(frame_seq, q_id, &res, &mut frame_buf, &mut att_buf, &mut cdr_buf);
+                    let _ = socket.send_to(&frame_buf[..rep_len], remote_host).await;
                 }
             }
             Either::Second(Ok((len, remote))) => {
@@ -479,19 +520,19 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                     info!("[Zenoh] OpenAck 수신! Zenoh 세션 수립(Established) 성공! 텔레메트리 스트리밍 시작.");
                     session_established = true;
                     frame_seq = 0;
-                    seq_imu = 0;
-                    seq_mag = 0;
-                    seq_press = 0;
-                    seq_temp = 0;
-                    seq_hum = 0;
+                    pub_imu = Publisher::<Imu>::new(gid_imu);
+                    pub_mag = Publisher::<MagneticField>::new(gid_mag);
+                    pub_press = Publisher::<FluidPressure>::new(gid_press);
+                    pub_temp = Publisher::<Temperature>::new(gid_temp);
+                    pub_hum = Publisher::<RelativeHumidity>::new(gid_hum);
 
-                    // 1. /nucleo/set_led Queryable 등록 (DECLARE_QUERYABLE)
+                    // 1. /nucleo/set_led Queryable 등록 (캡슐화된 ServiceServer 사용)
                     frame_seq = frame_seq.wrapping_add(1);
-                    let qable_len = ZenohWire::build_declare_queryable(&mut frame_buf, frame_seq, 1, srv_endpoints::KEY_SET_LED);
+                    let qable_len = srv_set_led.declare_queryable(frame_seq, &mut frame_buf);
                     let _ = socket.send_to(&frame_buf[..qable_len], remote_host).await;
 
-                    // 2. 세션 수립 즉시 ROS 2 Jazzy Liveliness Token 발행 (토픽 7종: NN + MP 5종 + MS 1종)
-                    for (i, &lv) in msg_endpoints::TOPIC_LIVELINESS_TOKENS.iter().enumerate() {
+                    // 2. 세션 수립 즉시 ROS 2 Jazzy Liveliness Token 발행 (8종 일괄 순회)
+                    for (i, &lv) in discovery.tokens().iter().enumerate() {
                         frame_seq = frame_seq.wrapping_add(1);
                         let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, (i + 10) as u32, lv);
                         let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
@@ -500,13 +541,6 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                         let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, lv, &[]);
                         let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
                     }
-                    frame_seq = frame_seq.wrapping_add(1);
-                    let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, 21, srv_endpoints::TOKEN_SET_LED);
-                    let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
-
-                    frame_seq = frame_seq.wrapping_add(1);
-                    let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, srv_endpoints::TOKEN_SET_LED, &[]);
-                    let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
                     continue;
                 }
 
@@ -515,42 +549,24 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                     continue;
                 }
 
+                // 3. 인그레스 프레임 디스패칭 (워커 태스크 채널로 Zero-copy 전달)
                 if let Some((msg_type, key_expr, q_id, payload)) = ZenohWire::parse_frame(&rx_packet[..len]) {
-                    if (key_expr.contains("cmd_vel") || (key_expr.is_empty() && payload.len() >= 48)) && (msg_type == msg_id::PUSH || msg_type == msg_id::PUT) {
-                        let actual_payload = if let Some(pos) = payload.windows(4).position(|w| w == [0x00, 0x01, 0x00, 0x00]) {
-                            &payload[pos..]
-                        } else {
-                            payload
-                        };
-                        if let Some(cmd) = Twist::decode_cdr(actual_payload) {
-                            info!("[ROS2 cmd_vel] linear.x={=f64} m/s, angular.z={=f64} rad/s", cmd.linear.x, cmd.angular.z);
+                    if sub_cmd_vel.matches(msg_type, key_expr, payload.len()) {
+                        if let Some(cmd) = sub_cmd_vel.decode(payload) {
+                            let _ = CMD_VEL_CHANNEL.try_send(cmd);
                         }
-                    } else if (key_expr.contains("set_led") || key_expr.is_empty()) && (msg_type == msg_id::QUERY || msg_type == msg_id::REQUEST) {
-                        let actual_payload = if let Some(pos) = payload.windows(4).position(|w| w == [0x00, 0x01, 0x00, 0x00]) {
-                            &payload[pos..]
-                        } else {
-                            payload
-                        };
-                        if let Some(req) = set_bool::Request::decode_cdr(actual_payload) {
-                            let mut led_guard = USER_LED.lock().await;
-                            if let Some(ref mut led) = *led_guard {
-                                if req.data {
-                                    led.set_high();
-                                } else {
-                                    led.set_low();
-                                }
-                            }
-                            info!("[ROS2 Service] /nucleo/set_led -> data={=bool} 처리 완료", req.data);
-
-                            // Response 직렬화 및 Zenoh REPLY 전송
-                            let resp = set_bool::Response::new(true, if req.data { "LED ON" } else { "LED OFF" });
-                            let resp_len = resp.encode_cdr(&mut cdr_buf);
-                            frame_seq = frame_seq.wrapping_add(1);
-                            ZenohWire::build_rmw_attachment(&mut att_buf, 1, 0, &zid_bytes);
-                            let rep_len = ZenohWire::build_reply(&mut frame_buf, frame_seq, q_id, srv_endpoints::KEY_SET_LED, Some(&att_buf), &cdr_buf[..resp_len]);
-                            let _ = socket.send_to(&frame_buf[..rep_len], remote).await;
+                    } else if srv_set_led.matches(msg_type, key_expr) {
+                        if let Some(req) = srv_set_led.decode_request(payload) {
+                            let _ = SET_LED_REQ_CHANNEL.try_send((req, q_id));
                         }
                     }
+                }
+
+                // 워커 태스크가 즉시 응답을 완료했을 경우 즉시 회수하여 송신
+                while let Ok((res, q_id)) = SET_LED_RES_CHANNEL.try_receive() {
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let rep_len = srv_set_led.build_reply(frame_seq, q_id, &res, &mut frame_buf, &mut att_buf, &mut cdr_buf);
+                    let _ = socket.send_to(&frame_buf[..rep_len], remote).await;
                 }
             }
             Either::Second(Err(_)) => {}
@@ -711,6 +727,8 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
     // 비동기 태스크 스폰
     spawner.spawn(task_net_runner(runner)).unwrap();
     spawner.spawn(task_env_sensor_loop()).unwrap();
+    spawner.spawn(task_sub_cmd_vel()).unwrap();
+    spawner.spawn(task_srv_set_led()).unwrap();
     spawner.spawn(task_zenoh_udp(stack)).unwrap();
     spawner.spawn(task_rtt_reporter(stack)).unwrap();
 }

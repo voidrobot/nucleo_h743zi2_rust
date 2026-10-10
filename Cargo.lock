@@ -982,6 +982,7 @@ dependencies = [
  "panic-probe",
  "so3-inekf",
  "static_cell",
+ "zenoh-ros2",
 ]
 
 [[package]]
@@ -1234,6 +1235,13 @@ checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
 dependencies = [
  "bytemuck",
  "safe_arch",
+]
+
+[[package]]
+name = "zenoh-ros2"
+version = "0.1.0"
+dependencies = [
+ "defmt 0.3.100",
 ]
 
 [[package]]

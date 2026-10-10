@@ -34,6 +34,7 @@ panic-probe = { version = "0.3.2", features = ["print-defmt"] }
 
 # 공통 하드웨어 보드 패키지
 nucleo-bsp = { path = "crates/nucleo-bsp" }
+zenoh-ros2 = { path = "crates/zenoh-ros2" }
 
 [profile.dev]
 opt-level = "s"
