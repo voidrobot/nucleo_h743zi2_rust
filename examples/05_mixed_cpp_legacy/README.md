@@ -3,7 +3,7 @@ title: "NUCLEO-H743ZI2 Mixed Language (Rust + Legacy C++) 예제 (05_mixed_cpp_l
 source: "examples/05_mixed_cpp_legacy"
 created: "2026-10-10 11:18:00"
 modified: "2026-10-10 12:00:00"
-description: "NUCLEO-H743ZI2 환경에서 레거시 C++ DSP 코드를 build.rs 및 clang++-18로 크로스 컴파일하여 Rust Embassy 비동기 펌웨어와 링크/호출하는 Mixed Language 아키텍처 및 빌드 시스템 심층 분석서"
+description: "NUCLEO-H743ZI2 환경에서 레거시 C++ DSP 코드를 build.rs 및 arm-none-eabi-g++로 크로스 컴파일하여 Rust Embassy 비동기 펌웨어와 링크/호출하는 Mixed Language 아키텍처 및 빌드 시스템 심층 분석서"
 tags:
   - "embedded-rust"
   - "mixed-language"
@@ -12,7 +12,7 @@ tags:
   - "dsp"
   - "embassy"
   - "stm32h743"
-  - "clang"
+  - "arm-none-eabi-g++"
   - "build-rs-deep-dive"
   - "memory-safety-deep-dive"
 ---
@@ -25,7 +25,7 @@ tags:
 항공, 로봇, 제어 도메인에는 수치적 정합성과 안정성이 기검증된 C/C++ 기반 DSP 알고리즘 및 수학 모델 자산이 광범위하게 운용된다. 이를 Rust로 전면 재작성(Full Rewrite)하는 방식은 막대한 재검증 비용 및 회귀 결함 위험을 수반한다. 따라서 기존 C++ 소스코드를 원형 그대로 보존하면서 신규 Rust 펌웨어 아키텍처에 무오버헤드로 통합하는 Mixed Language 연동 규격이 요구된다.
 
 ### ② 시스템 목표
-NUCLEO-H743ZI2 (Arm® Cortex®-M7 480 MHz) 개발 보드 및 X-NUCLEO-IKS01A3 센서 쉴드 환경에서, 기존 C++ 2차 IIR Biquad 저주파 통과 필터(LPF) 클래스를 Rust 빌드 파이프라인(`build.rs` + `cc` + `clang++-18`)을 통해 크로스 컴파일하고, Embassy 비동기 런타임에서 안전하게 실시간 호출하는 표준 참조 아키텍처를 제시한다.
+NUCLEO-H743ZI2 (Arm® Cortex®-M7 480 MHz) 개발 보드 및 X-NUCLEO-IKS01A3 센서 쉴드 환경에서, 기존 C++ 2차 IIR Biquad 저주파 통과 필터(LPF) 클래스를 Rust 빌드 파이프라인(`build.rs` + `cc` + `arm-none-eabi-g++`)을 통해 크로스 컴파일하고, Embassy 비동기 런타임에서 안전하게 실시간 호출하는 표준 참조 아키텍처를 제시한다.
 
 ---
 
@@ -36,7 +36,7 @@ flowchart TD
     subgraph BuildTime["빌드 타임 파이프라인 (Cargo + build.rs)"]
         A["cargo build --target thumbv7em-none-eabihf"] --> B["build.rs 실행"]
         B --> C["cc::Build 크로스 컴파일러 호출"]
-        C -->|"clang++-18 / -mcpu=cortex-m7 / -fno-exceptions / -fno-rtti"| D["cpp/src/biquad_filter.cpp"]
+        C -->|"arm-none-eabi-g++ / -mcpu=cortex-m7 / -fno-exceptions / -fno-rtti"| D["cpp/src/biquad_filter.cpp"]
         D --> E["liblegacy_dsp.a (정적 아카이브)"]
         E -->|"rust-lld 정적 링크 (cpp_link_stdlib: None)"| F["mixed_cpp_legacy_05 ELF 바이너리"]
     end
@@ -53,8 +53,8 @@ flowchart TD
 
 ## 3. 핵심 구현 메커니즘 (Key Implementation Mechanisms)
 
-### ① Clang 18 크로스 컴파일 파이프라인 (`build.rs`)
-- **LLVM 통합 크로스 컴파일**: 호스트 시스템의 `clang++-18`을 호출하여 타깃 아키텍처(`thumbv7em-none-eabihf`, Cortex-M7 Hard-float `fpv5-d16`)로 C++ 소스코드를 컴파일하고 정적 아카이브(`liblegacy_dsp.a`)를 생성한다.
+### ① ARM GCC 크로스 컴파일 파이프라인 (`build.rs`)
+- **GNU Arm Embedded 툴체인 연동**: 시스템의 `arm-none-eabi-g++`를 호출하여 타깃 아키텍처(`thumbv7em-none-eabihf`, Cortex-M7 Hard-float `fpv5-d16`, `-mthumb`)로 C++ 소스코드를 컴파일하고 정적 아카이브(`liblegacy_dsp.a`)를 생성한다.
 - **임베디드 C++ 런타임 제거 (`no_std` 호환)**:
   - `-fno-exceptions`: 예외 처리 테이블(`__gxx_personality_v0`) 및 DWARF 언와인딩 정보를 제거한다.
   - `-fno-rtti`: 런타임 타입 정보(`typeid`) 및 가상 함수 테이블 오버헤드를 제거한다.
@@ -117,14 +117,14 @@ sequenceDiagram
     actor Dev as "개발자 (cargo build)"
     participant Cargo as "Cargo 빌드 엔진"
     participant BuildRs as "build.rs (PC 호스트 실행)"
-    participant Clang as "Clang 18 크로스 컴파일러"
+    participant Gxx as "arm-none-eabi-g++ 크로스 컴파일러"
     participant Rustc as "Rust 링커 (rust-lld)"
 
     Dev->>Cargo: "cargo build --target thumbv7em-none-eabihf"
     Note over Cargo,BuildRs: [1단계: 사전 빌드 스크립트 실행 (호스트 PC)]
     Cargo->>BuildRs: "PC용으로 build.rs 컴파일 후 실행"
-    BuildRs->>Clang: "biquad_filter.cpp 크로스 컴파일 (-mcpu=cortex-m7)"
-    Clang-->>BuildRs: "liblegacy_dsp.a (정적 라이브러리) 생성"
+    BuildRs->>Gxx: "biquad_filter.cpp 크로스 컴파일 (-mcpu=cortex-m7)"
+    Gxx-->>BuildRs: "liblegacy_dsp.a (정적 라이브러리) 생성"
     BuildRs->>Cargo: "cargo:rustc-link-search (라이브러리 위치 통보)"
     
     Note over Cargo,Rustc: [2단계: 실제 MCU 펌웨어 링크 (STM32H7)]
@@ -162,7 +162,7 @@ sequenceDiagram
 | :--- | :--- | :--- |
 | **Mixed Language FFI** | - 기검증된 레거시 C++ 알고리즘 자산 재활용<br>- 알고리즘 재작성에 따른 검증 리스크 제거<br>- 직접 분기(Branch) 인스트럭션 기반 호출로 FFI 오버헤드 부재 | - `unsafe` 블록 경계 관리 필요<br>- C++ 예외 전파 불가에 따른 방어적 설계 필수 |
 | **Zero-Allocation 스택 방식** | - 힙 단편화 및 메모리 누수 위험 원천 배제<br>- 실시간 결정론(Deterministic Real-Time) 보장 | - C++ 클래스 크기 변경 시 Rust 인라인 버퍼 크기 재검증 필요 |
-| **Clang 18 크로스 컴파일** | - GCC 별도 설치 없이 LLVM 단일 파이프라인 유지<br>- `-O3` 고도 벡터화 최적화 활용 | - 호스트 시스템의 Clang 툴체인 버전 의존성 |
+| **ARM GCC (arm-none-eabi-g++)** | - 프로젝트 전반(예: 06_ros2_node 등)과 동일한 툴체인 단일화<br>- 임베디드 표준 Cortex-M7 플래그 및 아키텍처 지원 일관성 유지 | - 호스트 시스템에 `arm-none-eabi-gcc/g++` 패키지 설치 필요 |
 
 ---
 
