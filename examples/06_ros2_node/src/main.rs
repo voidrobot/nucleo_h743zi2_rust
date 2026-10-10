@@ -34,7 +34,7 @@ use msg::{endpoints as msg_endpoints, FluidPressure, Header, Imu, MagneticField,
 use srv::{set_bool, SetBoolService};
 use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::{BoardRmiiPins, I2C_FAST_MODE_HZ};
-use so3_inekf::inekf::RightInvariantInEKF;
+use so3_inekf::{InEKFConfig, RightInvariantInEKF, StillnessConfig};
 
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
@@ -676,6 +676,24 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
             // 5. HTS221
             let _ = i2c.write(ADDR_HTS221, &[hts221::CTRL_REG1, hts221::VAL_CTRL_REG1_1HZ_PD_BDU]).await;
         }
+    }
+
+    // InEKF 필터 초기화 (X-NUCLEO-IKS01A3 센서 메트롤로지 규격 기반 InEKFConfig 명시적 주입)
+    let inekf_config = InEKFConfig {
+        p_init_rot_var: 0.1,
+        p_init_bias_var: 0.01,
+        q_gyro: noise_lsm6dso::RECOMMENDED_Q_GYRO,
+        q_bias: noise_lsm6dso::RECOMMENDED_Q_BIAS,
+        r_accel: noise_lsm6dso::RECOMMENDED_R_ACCEL_DYNAMIC,
+        r_accel_stationary: noise_lsm6dso::RECOMMENDED_R_ACCEL_STATIONARY,
+        r_mag: noise_lis2mdl::RECOMMENDED_R_MAG,
+        g_ref: [0.0, 0.0, STANDARD_GRAVITY],
+        m_ref: [0.35, 0.0, 0.45],
+        stillness: StillnessConfig::default(),
+    };
+    {
+        let mut filter = INEKF_FILTER.lock().await;
+        *filter = RightInvariantInEKF::with_config(inekf_config);
     }
 
     // LAN8742A 이더넷 RMII

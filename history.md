@@ -13,6 +13,12 @@
   - **전수 검증**: 호스트 단위 테스트(3/3 PASS), 크로스 컴파일(0 warning), 보드 실기 플래시 및 Docker E2E 하네스 무회귀(Zero-Loss) 100% 통과.
 - **라이브러리 크레이트 3종 독립 README 기술 문서화 (`86ccc2d`)**:
   - `crates/nucleo-bsp`, `crates/so3-inekf`, `crates/zenoh-ros2` 하드웨어 매핑, 수학적 정식화 및 프로토콜 규격서 작성.
+- **`crates/so3-inekf` 센서 종속성 분리 및 하드웨어 스펙 기반 의존성 주입 리팩토링**:
+  - **순수 알고리즘 정화**: `so3-inekf`에서 `for_lsm6dso_and_lis2mdl` 함수 및 특정 센서/플랫폼 텍스트 언급(코드, 주석, 독스트링, README) 100% 제거 (Zero Hardware Mention 달성).
+  - **표준 메트롤로지 규격화**: IEEE Std 952/1293 표준 용어(ARW, RRW, VRW, 공분산 $Q, R$) 반영 및 범용 SI 기준 기본값(`InEKFConfig::new`) 재정립.
+  - **하드웨어 SSOT 분리**: `crates/nucleo-bsp/src/iks01a3/noise.rs`에 LSM6DSO/LIS2MDL 데이터시트 물리 잡음 상수 정의.
+  - **애플리케이션 명시적 주입**: `examples/04_ahrs_so3_inekf` 및 `06_ros2_node`에서 BSP 상수를 기반으로 `InEKFConfig`를 조립하여 필터에 주입하는 3계층 아키텍처 확립.
+  - **전수 검증**: 호스트 오라클 차등 테스트(19/19 통과), 예제 04 실기 플래시 및 REST API E2E 검증, 예제 06 Docker E2E 검증 100% 무회귀 통과.
 
 ---
 

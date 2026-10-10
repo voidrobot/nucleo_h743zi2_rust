@@ -69,42 +69,37 @@ impl Default for StillnessConfig {
     }
 }
 
-/// 6-DOF Right-Invariant InEKF 초기화 및 튜닝 설정 구조체
+/// 6-DOF Right-Invariant InEKF 초기화 및 튜닝 파라미터 설정 구조체
 #[derive(Clone, Copy, Debug)]
 pub struct InEKFConfig {
-    /// 초기 자세 오차 분산 ((rad)^2)
+    /// 초기 자세 오차 공분산 ((rad)^2)
     pub p_init_rot_var: f32,
-    /// 초기 자이로 바이어스 오차 분산 ((rad/s)^2)
+    /// 초기 각속도계 바이어스 오차 공분산 ((rad/s)^2)
     pub p_init_bias_var: f32,
-    /// 자이로스코프 프로세스 노이즈 분산 ((rad/s)^2/Hz)
+    /// 각속도계 각도 랜덤 워크 (Angle Random Walk, ARW) 연속시간 프로세스 노이즈 분산 ((rad/s)^2/Hz)
     pub q_gyro: f32,
-    /// 자이로 바이어스 랜덤워크 분산 ((rad/s^2)^2/Hz)
+    /// 각속도계 레이트 랜덤 워크 (Rate Random Walk, RRW) 바이어스 확산 공분산 ((rad/s^2)^2/Hz)
     pub q_bias: f32,
-    /// 가속도계 관측 노이즈 분산 ((m/s^2)^2)
+    /// 가속도계 속도 랜덤 워크 (Velocity Random Walk, VRW) 및 동적 기동 외란 관측 잡음 분산 ((m/s^2)^2)
     pub r_accel: f32,
-    /// 정지 상태 가속도계 관측 노이즈 분산 (신속 정렬용)
+    /// 정지 상태 (ZARU) 가속도계 중력 관측 잡음 분산 ((m/s^2)^2, 무외란 신속 정렬용)
     pub r_accel_stationary: f32,
-    /// 지자기 센서 관측 노이즈 분산 (정규화 단위)
+    /// 지자기 센서 정규화 관측 잡음 분산
     pub r_mag: f32,
-    /// 기준 중력 벡터 (m/s^2, NED 기준 [0, 0, g])
+    /// 기준 중력 벡터 (m/s^2, 기준 좌표계 [0, 0, g])
     pub g_ref: [f32; 3],
-    /// 기준 지구 자기장 정규화 벡터 (북향/하향 성분)
+    /// 기준 지구 자기장 정규화 방향 벡터
     pub m_ref: [f32; 3],
-    /// 정지 상태 감지 및 ZARU 파라미터
+    /// 정지 상태 감지 및 ZARU(Zero Angular Rate Update) 파라미터
     pub stillness: StillnessConfig,
 }
 
 impl InEKFConfig {
-    /// LSM6DSO (IMU) 및 LIS2MDL (지자기) 센서 데이터시트 스펙 기반 정규 파라미터 유도
-    ///
-    /// - LSM6DSO Gyro Noise Density: 3.8 mdps/√Hz ≈ 6.63e-5 rad/s/√Hz
-    /// - LSM6DSO Accel Noise Density: 60 µg/√Hz
-    /// - LIS2MDL Mag RMS Noise: 3 mgauss
-    pub const fn for_lsm6dso_and_lis2mdl(standard_gravity: f32) -> Self {
+    /// 범용 SI 단위 표준 기준값으로 InEKF 설정 생성 (const fn 지원)
+    pub const fn new(standard_gravity: f32) -> Self {
         Self {
             p_init_rot_var: 0.1,
             p_init_bias_var: 0.01,
-            // 100Hz 샘플링 대역폭 및 바이어스 안정도 마진 반영
             q_gyro: 1e-3,
             q_bias: 1e-5,
             r_accel: 0.2,
@@ -122,11 +117,14 @@ impl InEKFConfig {
             },
         }
     }
+
+    /// 표준 중력 가속도(9.80665 m/s^2) 기준 상수 설정
+    pub const DEFAULT: Self = Self::new(9.80665);
 }
 
 impl Default for InEKFConfig {
     fn default() -> Self {
-        Self::for_lsm6dso_and_lis2mdl(9.80665)
+        Self::DEFAULT
     }
 }
 
@@ -183,9 +181,9 @@ impl RightInvariantInEKF {
         }
     }
 
-    /// 기본 설정(LSM6DSO & LIS2MDL 표준 사양)으로 InEKF 인스턴스 생성 (const fn 지원)
+    /// 범용 SI 표준 기본 파라미터로 InEKF 인스턴스 생성 (const fn 지원)
     pub const fn new() -> Self {
-        let config = InEKFConfig::for_lsm6dso_and_lis2mdl(9.80665);
+        let config = InEKFConfig::DEFAULT;
         let mut p = [[0.0f32; 6]; 6];
         p[0][0] = config.p_init_rot_var;
         p[1][1] = config.p_init_rot_var;

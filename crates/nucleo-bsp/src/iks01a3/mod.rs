@@ -11,6 +11,7 @@
 //! 6. **HTS221**: 정전용량식 디지털 온습도 센서 (OTP 캘리브레이션 지원)
 
 pub mod hts221_calib;
+pub mod noise;
 pub mod registers;
 pub mod sensitivity;
 
@@ -19,3 +20,4 @@ pub use registers::addresses::*;
 pub use registers::who_am_i::*;
 pub use registers::{hts221, lis2dw12, lis2mdl, lps22hh, lsm6dso, stts751};
 pub use sensitivity::constants::*;
+pub use noise::{lis2mdl as noise_lis2mdl, lsm6dso as noise_lsm6dso};

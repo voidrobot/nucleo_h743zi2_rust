@@ -167,14 +167,17 @@ mod tests {
     }
 
     #[test]
-    fn test_inekf_config_builder_and_datasheet_derivation() {
+    fn test_inekf_config_generic_si() {
         let g = 9.80665;
-        let config = InEKFConfig::for_lsm6dso_and_lis2mdl(g);
+        let config = InEKFConfig::new(g);
         assert_eq!(config.g_ref[2], g);
 
         let filter = RightInvariantInEKF::with_config(config);
         assert_eq!(filter.config.g_ref[2], g);
         assert_eq!(filter.p[0][0], 0.1);
         assert_eq!(filter.p[3][3], 0.01);
+
+        let default_filter = RightInvariantInEKF::new();
+        assert_eq!(default_filter.config.g_ref[2], 9.80665);
     }
 }

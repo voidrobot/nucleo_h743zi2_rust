@@ -27,7 +27,7 @@ use heapless::String;
 use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::uid;
 use nucleo_bsp::{BoardLeds, BoardRmiiPins, I2C_FAST_MODE_HZ};
-use so3_inekf::{InEKFConfig, RightInvariantInEKF};
+use so3_inekf::{InEKFConfig, RightInvariantInEKF, StillnessConfig};
 use static_cell::StaticCell;
 
 /// InEKF 최소/최대 시간 증분 클램핑 경계 (초)
@@ -232,12 +232,22 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
     // 센서 하드웨어 초기화
     init_sensors().await;
 
-    // InEKF 필터 초기화 (데이터시트 기반 노이즈 공분산 파라미터 적용)
+    // InEKF 필터 초기화 (X-NUCLEO-IKS01A3 센서 메트롤로지 규격 기반 InEKFConfig 명시적 주입)
+    let inekf_config = InEKFConfig {
+        p_init_rot_var: 0.1,
+        p_init_bias_var: 0.01,
+        q_gyro: noise_lsm6dso::RECOMMENDED_Q_GYRO,
+        q_bias: noise_lsm6dso::RECOMMENDED_Q_BIAS,
+        r_accel: noise_lsm6dso::RECOMMENDED_R_ACCEL_DYNAMIC,
+        r_accel_stationary: noise_lsm6dso::RECOMMENDED_R_ACCEL_STATIONARY,
+        r_mag: noise_lis2mdl::RECOMMENDED_R_MAG,
+        g_ref: [0.0, 0.0, STANDARD_GRAVITY],
+        m_ref: [0.35, 0.0, 0.45],
+        stillness: StillnessConfig::default(),
+    };
     {
         let mut filter = INEKF_FILTER.lock().await;
-        *filter = RightInvariantInEKF::with_config(InEKFConfig::for_lsm6dso_and_lis2mdl(
-            STANDARD_GRAVITY,
-        ));
+        *filter = RightInvariantInEKF::with_config(inekf_config);
     }
 
     // NVIC CEC IRQ 바인딩 및 고우선순위(P6) 설정

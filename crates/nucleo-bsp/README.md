@@ -56,6 +56,11 @@ graph TD
   - 센서 내부 비휘발성 메모리에 기록된 온도/습도 선형 보간 계수($H_0, H_1, T_0, T_1$)를 읽어 고정밀 실수 환산 제공.
 - **감도 계수 변환 (`sensitivity.rs`)**:
   - LSB 단위 원시 정수 데이터를 표준 단위($\text{m/s}^2$, $\text{rad/s}$, $\text{gauss}$, $\text{hPa}$, $^\circ\text{C}$)로 변환하는 무동적할당 인라인 유틸리티.
+- **센서 메트롤로지 잡음 사양 (`noise.rs`)**:
+  - IEEE Std 952/1293 규격 기반 데이터시트 물리 잡음 상수(ARW, VRW, RMS 잡음) 및 100 Hz 칼만 필터 권장 공분산 제공:
+    - **LSM6DSO Gyro ARW**: $3.8\,\text{mdps}/\sqrt{\text{Hz}}$ ($\approx 6.632 \times 10^{-5}\,\text{rad/s}/\sqrt{\text{Hz}}$)
+    - **LSM6DSO Accel VRW**: $60\,\mu\text{g}/\sqrt{\text{Hz}}$ ($\approx 5.884 \times 10^{-4}\,\text{m/s}^2/\sqrt{\text{Hz}}$)
+    - **LIS2MDL Mag RMS Noise**: $3.0\,\text{mgauss}$ ($0.3\,\mu\text{T}$)
 
 ---
 
