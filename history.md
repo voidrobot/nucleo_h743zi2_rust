@@ -6,11 +6,13 @@
 
 ## 2026.10.11
 
-- **공용 미들웨어 크레이트 `crates/zenoh-ros2` 승격 및 OCP 리팩토링 (`39d5445`)**:
+- **공용 미들웨어 크레이트 `crates/zenoh-ros2` 승격 및 OCP 리팩토링 (`39d5445`, `f13ddda`, `7fdf083`)**:
   - **독립 크레이트 추출**: STM32/NUCLEO 의존성이 0%인 순수 `no_std`, Zero-allocation ROS 2 클라이언트(`crates/zenoh-ros2`) 신설 (`wire`, `cdr`, `traits`, `types`).
   - **엔티티 캡슐화**: 단조 증가 시퀀스 번호(`seq: i64`) 은닉 `Publisher<T>`, 토픽 매칭 `Subscriber<T>`, 쿼리어블 `ServiceServer<S>`, 자율 등록 `DiscoveryRegistry` 구현.
   - **단일 CPU 최적화 태스크 분리**: `task_sub_cmd_vel` 및 `task_srv_set_led`를 각자의 `loop`를 소유한 `embassy_executor::task`로 분리하고 비동기 `Channel` 연동.
   - **전수 검증**: 호스트 단위 테스트(3/3 PASS), 크로스 컴파일(0 warning), 보드 실기 플래시 및 Docker E2E 하네스 무회귀(Zero-Loss) 100% 통과.
+- **라이브러리 크레이트 3종 독립 README 기술 문서화 (`86ccc2d`)**:
+  - `crates/nucleo-bsp`, `crates/so3-inekf`, `crates/zenoh-ros2` 하드웨어 매핑, 수학적 정식화 및 프로토콜 규격서 작성.
 
 ---
 

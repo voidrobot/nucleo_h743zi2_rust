@@ -10,7 +10,7 @@
 - **MCU**: STM32H743ZI (Arm® 32-bit Cortex®-M7 with double-precision FPU, L1 캐시, 최대 480 MHz 동작)
 - **메모리**: 2 MB Dual-Bank Flash, 1 MB RAM (TCM RAM, AXI SRAM, SRAM1~4, Backup SRAM 분할 구조)
 - **온보드 디버거**: ST-LINK/V3E (SWD/JTAG 디버깅, 가상 COM 포트, RTT 통신 지원)
-- **사용자 I/O**: 사용자 LED 3개 (Green, Blue, Red), 사용자 푸시 버튼 1개, Reset 버튼 1개
+- **사용자 I/O**: 사용자 LED 3개 (Green, Yellow, Red), 사용자 푸시 버튼 1개, Reset 버튼 1개
 - **커넥터**: ST Zio 확장 커넥터(Arduino Uno V3 호환) 및 ST morpho 헤더
 
 ### ② 센서 쉴드: X-NUCLEO-IKS01A3

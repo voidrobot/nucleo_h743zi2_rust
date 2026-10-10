@@ -2,8 +2,8 @@
 title: "NUCLEO-H743ZI2 임베디드 ROS 2 노드 펌웨어 및 Docker 하네스 (06_ros2_node)"
 source: "examples/06_ros2_node"
 created: "2026-10-10 16:50:00"
-modified: "2026-10-10 16:50:00"
-description: "온보드 이더넷과 Zenoh 1.0 프로토콜을 결합하여 NUCLEO-H743ZI2를 완전한 ROS 2 독립 센서/제어 노드로 구동하고, 호스트 OS 오염 없이 Docker 격리 환경에서 host_bringup 패키지로 검증하는 임베디드 예제"
+modified: "2026-10-11 02:25:00"
+description: "온보드 이더넷과 Zenoh 1.0 프로토콜을 결합하여 NUCLEO-H743ZI2를 완전한 ROS 2 독립 센서/제어 노드로 구동하고, zenoh-ros2 크레이트 기반의 멀티태스크 구조와 Docker 격리 하네스로 검증하는 임베디드 예제"
 tags:
   - "embedded-rust"
   - "ros2"
@@ -13,6 +13,7 @@ tags:
   - "docker"
   - "no_std"
   - "harness"
+  - "zenoh-ros2"
 ---
 
 # NUCLEO-H743ZI2 임베디드 ROS 2 노드 펌웨어 및 Docker 하네스 (06_ros2_node)
@@ -33,6 +34,8 @@ tags:
 3. **네임스페이스 및 도메인 격리 (Strict Namespacing & Domain ID)**:
    - 다중 센서/로봇 환경에서의 토픽 및 서비스 충돌을 방지하기 위해 모든 엔드포인트는 **`/nucleo/`** 네임스페이스를 기본 적용한다.
    - 펌웨어 내 SSOT 상수 `ROS_DOMAIN_ID`를 Zenoh 키 표현식의 최상위 계층으로 직접 매핑하여 논리적 도메인 격리를 보장한다.
+4. **미들웨어 계층의 완전 분리 (`zenoh-ros2`)**:
+   - 저수준 프로토콜 직렬화 및 엔티티 상태 머신 코드를 공용 라이브러리 크레이트(`crates/zenoh-ros2`)로 분리하여 비즈니스 로직(센서 획득 및 액추에이터 제어)의 응집도를 극대화한다.
 
 ---
 
@@ -41,25 +44,51 @@ tags:
 ```mermaid
 flowchart TD
     subgraph Target ["NUCLEO-H743ZI2 (Rust Firmware: examples/06_ros2_node)"]
-        Sensors["X-NUCLEO-IKS01A3 (6종 센서)"] -->|"I2C1 DMA 400kHz"| InEKF["SO(3) InEKF (100Hz RT 선점 P6)"]
-        Sensors -->|"I2C1 폴링"| EnvSense["환경 센서 태스크 (10Hz / 1Hz)"]
-        
-        InEKF -->|"Orientation, Accel, Gyro"| Pub_IMU["Pub: /nucleo/imu/data (sensor_msgs/Imu)"]
-        EnvSense -->|"Mag (Tesla)"| Pub_Mag["Pub: /nucleo/imu/mag (sensor_msgs/MagneticField)"]
-        EnvSense -->|"Pressure (Pa)"| Pub_Press["Pub: /nucleo/pressure (sensor_msgs/FluidPressure)"]
-        EnvSense -->|"Temp (°C)"| Pub_Temp["Pub: /nucleo/temperature (sensor_msgs/Temperature)"]
-        EnvSense -->|"Humidity (0~1)"| Pub_Hum["Pub: /nucleo/humidity (sensor_msgs/RelativeHumidity)"]
-        
-        Sub_Vel["Sub: /nucleo/cmd_vel (geometry_msgs/Twist)"] -->|"수신 및 파싱"| RTT_Log["RTT 콘솔 로그 출력 (linear.x, angular.z)"]
-        Srv_LED["Srv: /nucleo/set_led (SetBool)"] -->|"LED 점등/소등"| LED["온보드 LED (LD1 Green)"]
+        subgraph HardwareSense ["센서 및 제어 하드웨어 (nucleo-bsp)"]
+            Sensors["X-NUCLEO-IKS01A3 (6종 센서)"] -->|"I2C1 Fast Mode (400kHz)"| InEKF_Task["SO(3) InEKF (100Hz RT 선점 NVIC P6)"]
+            Sensors -->|"I2C1 폴링"| EnvSense["환경 센서 태스크 (10Hz / 1Hz)"]
+            LED["온보드 LED (LD1 Green)"]
+        end
 
-        Pub_IMU & Pub_Mag & Pub_Press & Pub_Temp & Pub_Hum --> CDR["no_std 정규 CDR 직렬화기"]
-        CDR --> ZenohEngine["Zenoh 1.0 프로토콜 엔진 (UDP 7447)<br>Prefix: ROS_DOMAIN_ID (0)"]
-        TIM7["TIM7 (1kHz P5)"] -->|"통계 틱"| Stat["/proc/stat 프로파일러"]
+        subgraph Middleware ["공용 미들웨어 (crates/zenoh-ros2)"]
+            Registry["DiscoveryRegistry<br/>(@ros2_lv 일괄 등록)"]
+            Pub_IMU["Publisher&lt;Imu&gt; (100Hz)"]
+            Pub_Mag["Publisher&lt;MagneticField&gt; (10Hz)"]
+            Pub_Env["Publisher&lt;FluidPressure, Temp, Hum&gt; (1Hz)"]
+            Sub_Vel["Subscriber&lt;Twist&gt;"]
+            Srv_LED["ServiceServer&lt;SetBool&gt;"]
+            Wire["ZenohWire (FRAME / PUSH / PUT / REPLY)"]
+            CDR["no_std CdrWriter / CdrReader"]
+        end
+
+        subgraph AsyncConcurrency ["Embassy 비동기 채널 및 독립 태스크"]
+            InEKF_Task -->|"원자적 스냅샷 갱신"| Snap_IMU["IMU_SNAPSHOT"]
+            EnvSense -->|"원자적 스냅샷 갱신"| Snap_ENV["ENV_SNAPSHOT"]
+            
+            TxTask["Zenoh 송신 태스크 (100Hz / 10Hz / 1Hz)"]
+            RxTask["Zenoh UDP 수신 디스패처 (Port 7447)"]
+            
+            SubTask["독립 subscriber_task<br/>(cmd_vel 속도 수신)"]
+            SrvTask["독립 service_task<br/>(set_led 서비스 서버)"]
+            
+            Chan_Cmd["Channel&lt;Twist, 4&gt;"]
+            Chan_Srv["Channel&lt;ServiceReq, 2&gt;"]
+        end
+
+        Snap_IMU & Snap_ENV --> TxTask
+        TxTask --> Pub_IMU & Pub_Mag & Pub_Env
+        Pub_IMU & Pub_Mag & Pub_Env --> Wire
+
+        RxTask -->|"Twist 패킷 분기"| Chan_Cmd --> SubTask
+        RxTask -->|"SetBool 요청 분기"| Chan_Srv --> SrvTask
+        
+        SubTask -->|"속도 파싱"| RTT_Log["RTT 콘솔 로그 출력"]
+        SrvTask -->|"GPIO 토글"| LED
+        SrvTask -->|"REPLY 프레임 송출"| Wire
     end
 
     subgraph Network ["물리 이더넷 링크 (LAN8742A RMII)"]
-        ZenohEngine <===>|"Zenoh UDP 와이어 프로토콜 (Key: 0/nucleo/...)"| HostNet["호스트 물리 네트워크 (--net=host)"]
+        Wire <===>|"Zenoh UDP 와이어 프로토콜 (Key: 0/nucleo/...)"| HostNet["호스트 물리 네트워크 (--net=host)"]
     end
 
     subgraph HostContainer ["Docker 격리 컨테이너 (ros:jazzy-ros-base + rmw_zenoh_cpp)"]
@@ -76,24 +105,29 @@ flowchart TD
 
 ## 3. 핵심 구현 메커니즘 (Key Implementation Mechanisms)
 
-### ① `no_std` 정규 ROS 2 CDR 직렬화기 (`src/cdr.rs`)
-- 힙 할당 없이(Zero-Allocation) 고정 크기 슬라이스 위에 정합 바이트 오프셋(Alignment)을 엄격히 준수하며 인코딩한다.
-- `std_msgs/msg/Header`, `sensor_msgs/msg/Imu` (Quat $x, y, z, w$ 순서), `MagneticField`, `FluidPressure`, `Temperature`, `RelativeHumidity`, `geometry_msgs/msg/Twist`, `example_interfaces/srv/SetBool`을 100% 바이너리 호환 지원한다.
+### ① `crates/zenoh-ros2` 미들웨어 연동
+본 예제는 저수준 직렬화 및 와이어 조작 코드를 직접 포함하지 않고, 전용 라이브러리인 `zenoh-ros2` 크레이트를 의존하여 통신을 수행한다:
+- **`Publisher<T>`**: 16바이트 GID와 단조 증가 시퀀스 번호(`seq: i64`)를 내부 상태로 캡슐화하여, 멀티플렉싱 환경에서 시퀀스가 뒤엉켜 `A message was lost!` 경고가 발생하는 결함을 원천 방지한다.
+- **`Subscriber<T>`**: 와이어 페이로드에서 토픽 키 매칭 및 CDR 역직렬화를 수행한다.
+- **`ServiceServer<S>`**: Queryable 선언 및 클라이언트의 Request 파싱, Response 패킹, Zenoh Reply 프레임 합성을 전담한다.
+- **`DiscoveryRegistry`**: OCP(개방-폐쇄 원칙) 기반으로 모든 엔드포인트의 ROS 2 Liveliness Token(`@ros2_lv/...`)을 단일 레지스트리에 등록하고 부팅 시 일괄 선언한다.
 
-### ② Zenoh 1.0 와이어 프로토콜 엔진 (`src/zenoh_wire.rs`)
-- VLE(Variable-Length Encoding / LEB128) 기반 프레임 패킹:
-  - Transport Layer: `FRAME` (0x05)
-  - Network Layer: `PUSH` (0x1D), `QUERY` (0x07), `REPLY` (0x09)
-  - Data Layer: `PUT` (0x01)
-- `ROS_DOMAIN_ID` 계층형 키 매핑:
-  - `0/nucleo/imu/data`
-  - `0/nucleo/cmd_vel`
-  - `0/nucleo/set_led`
+### ② ROS 2 Jazzy `rmw_zenoh_cpp` 와이어 키 및 토큰 규격
+ROS 2 Jazzy 그래프에서 정식 엔드포인트로 인식되기 위해 아래와 같은 정식 와이어 키 및 토큰 형식을 준수한다:
+- **토픽 키 형식**: `<DOMAIN_ID>/<TOPIC_NAME>/<TYPE_NAME>/<TYPE_HASH>`
+  - 예: `0/nucleo/imu/data/sensor_msgs::msg::dds_::Imu_/RIHS01_...`
+- **서비스 키 형식**: `<DOMAIN_ID>/<SERVICE_NAME>/<TYPE_NAME>/<TYPE_HASH>`
+  - 예: `0/nucleo/set_led/example_interfaces::srv::dds_::SetBool_/RIHS01_...`
+- **Liveliness 토큰 형식**: `@ros2_lv/<DOMAIN_ID>/<GID>/<SEQ>/<ENTITY_TYPE>/<NODE_NS>/<NODE_NAME>/<TOPIC_NAME>/<TYPE_NAME>/<TYPE_HASH>/<QOS>`
+  - `ENTITY_TYPE`: `NN` (Node Name), `MP` (Message Publisher), `MS` (Message Subscriber), `SS` (Service Server)
 
-### ③ 실시간 동시성 아키텍처 (`src/main.rs`)
+### ③ 비동기 채널 기반 멀티태스크 동시성 아키텍처 (`src/main.rs`)
 - **100 Hz RT 선점 인터럽트 (`Priority::P6`)**: InEKF 칼만 필터를 단 30 $\mu\text{s}$ 만에 연산하고 원자적 스냅샷(`IMU_SNAPSHOT`)을 갱신.
-- **100 Hz Zenoh UDP 태스크**: 스냅샷을 읽어 CDR 패킷을 조립하고 UDP 브로드캐스트로 고속 송출.
-- **cmd_vel & set_led 수신**: 수신 패킷을 Non-blocking으로 폴링하여 속도 명령은 RTT 콘솔로 출력하고, LED 서비스 요청은 온보드 GPIO를 제어한 뒤 즉시 Zenoh REPLY로 응답.
+- **100 Hz Zenoh UDP 송신 태스크**: 스냅샷을 읽어 `Publisher<T>`로 CDR 패킷을 조립하고 UDP 브로드캐스트로 고속 송출.
+- **수신 디스패처 및 독립 비동기 태스크 분리**:
+  - UDP RX 루프는 수신 패킷의 키를 식별하여 `CMD_VEL_CHANNEL` 또는 `SERVICE_CHANNEL`로 라우팅한다.
+  - **`subscriber_task`**: `CMD_VEL_CHANNEL`로부터 `Twist` 메시지를 수신하여 비동기로 파싱하고 RTT 콘솔로 출력.
+  - **`service_task`**: `SERVICE_CHANNEL`로부터 `SetBool` 요청을 수신하여 온보드 LED(LD1 Green)를 제어한 뒤 즉시 Zenoh REPLY 프레임을 합성하여 클라이언트로 응답.
 - **1 kHz TIM7 틱 프로파일러 (`Priority::P5`)**: 15ns 초경량 통계 카운터로 CPU 점유율을 실시간 계측.
 
 ### ④ Docker 격리형 정식 ROS 2 패키지 (`test_host/`)
@@ -107,6 +141,8 @@ flowchart TD
 | 구분 | 장점 (Pros) | 한계 및 주의점 (Cons & Constraints) |
 | :--- | :--- | :--- |
 | **Zenoh (rmw_zenoh)** | - 호스트 브리지 데몬 완전 불필요<br>- 와이어 오버헤드 5바이트 (DDS 대비 90% 이상 절감)<br>- 100~500Hz 초고속 제어 지원 | - ROS 2 Jazzy 이상 최신 배포판 권장<br>- Domain ID 불일치 시 패킷 자동 드롭 (일치 필수) |
+| **zenoh-ros2 크레이트 분리** | - 프로토콜 직렬화와 애플리케이션 제어 로직의 완전한 관심사 분리<br>- 순수 no_std 기반으로 호스트 단위 테스트 가능 | - 엔티티 추가 시 Liveliness Token 및 Type Hash 메타데이터 동기화 필요 |
+| **비동기 채널 분리 태스크** | - 수신 디스패처가 블로킹되지 않고 즉시 다음 패킷 수신 대기 가능<br>- 속도 명령 수신과 서비스 응답 처리의 독립적 주기 보장 | - 비동기 채널 큐 크기(`Channel<..., N>`) 초과 시 백프레셔 고려 필요 |
 | **Docker 격리 하네스** | - 호스트 OS 설치 0, 빌드 부산물 유출 0<br>- 정식 ROS 2 노드와의 100% 호환성 보증 | - 도커 데몬 실행 권한 필요 (`docker run`) |
 
 ---
@@ -115,8 +151,10 @@ flowchart TD
 
 ### ① 타깃 펌웨어 빌드 및 플래시
 ```bash
-# NUCLEO 보드 연결 후 플래시 및 RTT 실행
-cargo run --bin ros2_node_06
+# NUCLEO 보드 연결 후 빌드, 플래시 및 RTT 로깅 실행
+cargo run -p ros2_node_06 --target thumbv7em-none-eabihf
+# 또는 릴리스 최적화 모드로 플래시:
+cargo run -p ros2_node_06 --target thumbv7em-none-eabihf --release
 ```
 
 ### ② 호스트 Docker 원스톱 자동화 검증
@@ -163,7 +201,12 @@ ros2 run rmw_zenoh_cpp rmw_zenohd > /tmp/zenohd.log 2>&1 &
 라우터 데몬이 구동되면 NUCLEO-H743ZI2 보드가 발행/수신하는 ROS 2 엔드포인트가 즉시 식별된다:
 
 ```bash
-# 1. 활성 토픽 목록 확인
+# 1. 활성 노드 목록 확인
+ros2 node list
+# 기대 출력:
+# /nucleo_h743zi2
+
+# 2. 활성 토픽 목록 확인
 ros2 topic list
 # 기대 출력:
 # /nucleo/cmd_vel
@@ -173,7 +216,7 @@ ros2 topic list
 # /nucleo/pressure
 # /nucleo/temperature
 
-# 2. 서비스 목록 확인
+# 3. 서비스 목록 확인
 ros2 service list
 # 기대 출력:
 # /nucleo/set_led
@@ -213,3 +256,15 @@ ros2 service call /nucleo/set_led example_interfaces/srv/SetBool "{data: false}"
 # 3. 로봇 주행 속도 명령 발행 (NUCLEO RTT 콘솔에서 실시간 파싱 및 수신 로그 확인)
 ros2 topic pub --once /nucleo/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.2}}"
 ```
+
+---
+
+## 7. 관련 문서 및 소스코드 참조 (References)
+
+- [main.rs](src/main.rs): `06_ros2_node` 메인 펌웨어 및 Embassy 비동기 멀티태스크
+- [msg.rs](src/msg.rs): NUCLEO 센서 전용 ROS 2 메시지 정의 및 토픽 메타데이터 SSOT
+- [srv.rs](src/srv.rs): ROS 2 서비스 Request/Response 정의 및 서비스 메타데이터 SSOT
+- [zenoh-ros2 크레이트](../../crates/zenoh-ros2/README.md): 임베디드 순수 Rust Zenoh 1.0 / ROS 2 미들웨어 명세서
+- [so3-inekf 크레이트](../../crates/so3-inekf/README.md): $SO(3)$ 우불변 InEKF 수학 코어
+- [nucleo-bsp 크레이트](../../crates/nucleo-bsp/README.md): 온보드 핀아웃 및 센서 레지스터 맵
+- [Docker 테스트 하네스](test_host/run_test.sh): 원스톱 자동화 검증 스크립트
