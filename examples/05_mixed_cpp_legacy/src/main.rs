@@ -1,0 +1,113 @@
+#![no_std]
+#![no_main]
+
+use defmt::*;
+use defmt_rtt as _;
+use panic_probe as _;
+
+use embassy_executor::Spawner;
+use embassy_stm32::bind_interrupts;
+use embassy_stm32::i2c::{self, I2c};
+use embassy_stm32::time::Hertz;
+use embassy_time::{Duration, Ticker};
+use nucleo_bsp::BoardLeds;
+
+use mixed_cpp_legacy_05::cpp_bridge::SafeBiquadFilter;
+
+bind_interrupts!(struct Irqs {
+    I2C1_EV => i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
+    I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
+});
+
+const ADDR_LSM6DSO: u8 = 0x6B;
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    info!("============================================================");
+    info!(">>> NUCLEO-H743ZI2 Mixed Language (Rust + Legacy C++) <<<");
+    info!("============================================================");
+
+    let p = embassy_stm32::init(Default::default());
+    let mut leds = BoardLeds::new(p.PB0, p.PE1, p.PB14);
+    leds.green.set_high();
+
+    // 1. I2C1 마스터 버스 초기화 (400kHz Fast Mode)
+    let mut i2c = I2c::new(
+        p.I2C1,
+        p.PB8, // SCL
+        p.PB9, // SDA
+        Irqs,
+        p.DMA1_CH0,
+        p.DMA1_CH1,
+        Hertz(400_000),
+        Default::default(),
+    );
+    info!("I2C1 버스 400kHz 초기화 완료 (PB8/PB9)");
+
+    // 2. LSM6DSO 6축 IMU 센서 WHO_AM_I 검증 및 활성화
+    let mut who = [0u8; 1];
+    if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[0x0F], &mut who).await {
+        error!("LSM6DSO WHO_AM_I 읽기 실패: {:?}", e);
+        leds.red.set_high();
+        return;
+    }
+    info!("LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x6C)", who[0]);
+
+    // CTRL1_XL = 0x62 (416Hz ODR, ±2g, LPF2 활성화)
+    let _ = i2c.write(ADDR_LSM6DSO, &[0x10, 0x62]).await;
+    // CTRL2_G = 0x60 (416Hz ODR, ±250dps)
+    let _ = i2c.write(ADDR_LSM6DSO, &[0x11, 0x60]).await;
+    info!("LSM6DSO 416Hz ODR 하드웨어 가속도계 가동 완료");
+
+    // 3. 레거시 C++ Biquad 필터 인스턴스 초기화 (Zero-Allocation 인라인 스택 할당)
+    // 샘플링 주파수: 100 Hz, 차단 주파수: 5 Hz (고주파 노이즈 제거), Q: 0.7071 (Butterworth)
+    let mut filter_x = SafeBiquadFilter::new_lpf(100.0, 5.0, 0.7071);
+    let mut filter_y = SafeBiquadFilter::new_lpf(100.0, 5.0, 0.7071);
+    let mut filter_z = SafeBiquadFilter::new_lpf(100.0, 5.0, 0.7071);
+    info!("C++ BiquadFilter 3축(X, Y, Z) 인스턴스 초기화 완료 (Fs=100Hz, Fc=5Hz)");
+
+    leds.green.set_low();
+
+    // 4. 100 Hz (10ms) 비동기 센서 취득 및 레거시 C++ 필터 실시간 연동 루프
+    let mut ticker = Ticker::every(Duration::from_hz(100));
+    let mut count = 0u32;
+    let mut accel_buf = [0u8; 6];
+
+    loop {
+        ticker.next().await;
+        count = count.wrapping_add(1);
+
+        // LSM6DSO 가속도계 데이터 레지스터 (0x28: OUTX_L_A ~ OUTZ_H_A) 6바이트 버스트 읽기
+        if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[0x28], &mut accel_buf).await {
+            warn!("가속도계 읽기 오류: {:?}", e);
+            continue;
+        }
+
+        let ax_raw = i16::from_le_bytes([accel_buf[0], accel_buf[1]]);
+        let ay_raw = i16::from_le_bytes([accel_buf[2], accel_buf[3]]);
+        let az_raw = i16::from_le_bytes([accel_buf[4], accel_buf[5]]);
+
+        // ±2g 범위: 0.061 mg/LSB
+        let ax_mg = ax_raw as f32 * 0.061;
+        let ay_mg = ay_raw as f32 * 0.061;
+        let az_mg = az_raw as f32 * 0.061;
+
+        // --- C++ 레거시 Direct Form II Transposed Biquad LPF FFI 호출 ---
+        let ax_filt = filter_x.process(ax_mg);
+        let ay_filt = filter_y.process(ay_mg);
+        let az_filt = filter_z.process(az_mg);
+
+        // 매 100스텝(1초)마다 RTT로 원시 노이즈 데이터 vs C++ 필터링 데이터 비교 출력
+        if count % 100 == 0 {
+            info!(
+                "[100Hz #{}] RAW: [{=f32}, {=f32}, {=f32}] mg | C++ LPF: [{=f32}, {=f32}, {=f32}] mg",
+                count, ax_mg, ay_mg, az_mg, ax_filt, ay_filt, az_filt
+            );
+        }
+
+        // 50스텝(0.5초)마다 녹색 LED 토글 (하트비트)
+        if count % 50 == 0 {
+            leds.green.toggle();
+        }
+    }
+}

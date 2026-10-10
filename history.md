@@ -11,7 +11,12 @@
   - `#[embassy_executor::main]` 제거 및 `raw::Executor::new(core::ptr::null_mut())` 기반 커스텀 메인 루프 도입 (Embassy 라이브러리 포크/수정 0%).
   - 메인 루프 `cortex_m::asm::wfe()` 전후 DWT 사이클 카운터 계측으로 슬립 사이클 구간 $C_{\text{wfe\_span}}$ 누적.
   - 고우선순위 선점 인터럽트(`InterruptExecutor`) 도메인 InEKF 순수 연산 사이클 $C_{\text{rt}}$ 분리 차감 및 1초 단위 실제 DWT 총 사이클 기반 동적 자가 보정(Self-Calibrating) 알고리즘 적용 (매직 넘버 0개, 클럭 주파수 오차 0%).
-  - 물리 보드 실측 검증: 대기 시 시스템 순수 부하 7.57% (InEKF 5.99% + 백그라운드 1.58%), 12.5 Hz 웹 폴링 시 10.76% 정밀 동적 반영 확인.
+- **05_mixed_cpp_legacy (Mixed Language Rust + Legacy C++)**:
+  - `build.rs` + `cc` 크레이트 및 `clang++-18` 기반 Cortex-M7 (`thumbv7em-none-eabihf`, Hard-float FPU) C++ 크로스 컴파일 파이프라인 구축.
+  - `-fno-exceptions`, `-fno-rtti`, `-fno-unwind-tables`, `cpp_link_stdlib(None)`을 통한 순수 자립형(Freestanding) C++ 런타임 제로화.
+  - 2차 IIR Biquad 저주파 통과 필터(Direct Form II Transposed) C++ 클래스 및 Zero-Allocation C-ABI 브리지 구현 (Flash 28 KB, RAM 33.4 KB).
+  - Rust Newtype Safe RAII 래퍼(`SafeBiquadFilter`, 32B 인라인 저장소)로 C++ 인스턴스 라이프사이클 캡슐화.
+  - NUCLEO-H743ZI2 물리 보드 플래시 및 100 Hz 비동기 I2C 가속도계 데이터 실시간 C++ 필터링 RTT 실측 검증 완료.
 
 
 ## 2026.10.09

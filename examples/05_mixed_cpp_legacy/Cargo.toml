@@ -1,0 +1,23 @@
+[package]
+name = "mixed_cpp_legacy_05"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mixed Language (Rust + Legacy C++) example on NUCLEO-H743ZI2"
+
+[dependencies]
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+nucleo-bsp.workspace = true
+embassy-executor.workspace = true
+embassy-stm32.workspace = true
+embassy-time.workspace = true
+embassy-sync.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+panic-probe.workspace = true
+libm = "0.2"
+
+[build-dependencies]
+cc = "1.0"
