@@ -39,6 +39,97 @@ pub fn invert_3x3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
     Some(inv)
 }
 
+/// 정지 상태(Stillness / ZARU) 감지기 설정 파라미터
+#[derive(Clone, Copy, Debug)]
+pub struct StillnessConfig {
+    /// 1차 지수이동평균(EMA) 필터 계수 (100Hz 기준 약 20샘플 시정수)
+    pub alpha: f32,
+    /// 정지 판정 각속도 분산 임계치 ((rad/s)^2)
+    pub gyro_var_threshold: f32,
+    /// 정지 판정 가속도 분산 임계치 ((m/s^2)^2)
+    pub accel_var_threshold: f32,
+    /// 정지 판정 중력장 크기 오차 허용치 (m/s^2)
+    pub gravity_diff_threshold: f32,
+    /// 정지 상태 판정을 위한 연속 감지 카운트 임계치 (100Hz 기준 30회 = 0.3초)
+    pub stationary_debounce_count: u32,
+    /// ZARU(Zero Angular Rate Update) 바이어스 수렴 학습률
+    pub bias_learning_rate: f32,
+}
+
+impl Default for StillnessConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            gyro_var_threshold: 0.0005,
+            accel_var_threshold: 0.05,
+            gravity_diff_threshold: 0.5,
+            stationary_debounce_count: 30,
+            bias_learning_rate: 0.002,
+        }
+    }
+}
+
+/// 6-DOF Right-Invariant InEKF 초기화 및 튜닝 설정 구조체
+#[derive(Clone, Copy, Debug)]
+pub struct InEKFConfig {
+    /// 초기 자세 오차 분산 ((rad)^2)
+    pub p_init_rot_var: f32,
+    /// 초기 자이로 바이어스 오차 분산 ((rad/s)^2)
+    pub p_init_bias_var: f32,
+    /// 자이로스코프 프로세스 노이즈 분산 ((rad/s)^2/Hz)
+    pub q_gyro: f32,
+    /// 자이로 바이어스 랜덤워크 분산 ((rad/s^2)^2/Hz)
+    pub q_bias: f32,
+    /// 가속도계 관측 노이즈 분산 ((m/s^2)^2)
+    pub r_accel: f32,
+    /// 정지 상태 가속도계 관측 노이즈 분산 (신속 정렬용)
+    pub r_accel_stationary: f32,
+    /// 지자기 센서 관측 노이즈 분산 (정규화 단위)
+    pub r_mag: f32,
+    /// 기준 중력 벡터 (m/s^2, NED 기준 [0, 0, g])
+    pub g_ref: [f32; 3],
+    /// 기준 지구 자기장 정규화 벡터 (북향/하향 성분)
+    pub m_ref: [f32; 3],
+    /// 정지 상태 감지 및 ZARU 파라미터
+    pub stillness: StillnessConfig,
+}
+
+impl InEKFConfig {
+    /// LSM6DSO (IMU) 및 LIS2MDL (지자기) 센서 데이터시트 스펙 기반 정규 파라미터 유도
+    ///
+    /// - LSM6DSO Gyro Noise Density: 3.8 mdps/√Hz ≈ 6.63e-5 rad/s/√Hz
+    /// - LSM6DSO Accel Noise Density: 60 µg/√Hz
+    /// - LIS2MDL Mag RMS Noise: 3 mgauss
+    pub const fn for_lsm6dso_and_lis2mdl(standard_gravity: f32) -> Self {
+        Self {
+            p_init_rot_var: 0.1,
+            p_init_bias_var: 0.01,
+            // 100Hz 샘플링 대역폭 및 바이어스 안정도 마진 반영
+            q_gyro: 1e-3,
+            q_bias: 1e-5,
+            r_accel: 0.2,
+            r_accel_stationary: 0.04,
+            r_mag: 0.1,
+            g_ref: [0.0, 0.0, standard_gravity],
+            m_ref: [0.35, 0.0, 0.45],
+            stillness: StillnessConfig {
+                alpha: 0.05,
+                gyro_var_threshold: 0.0005,
+                accel_var_threshold: 0.05,
+                gravity_diff_threshold: 0.5,
+                stationary_debounce_count: 30,
+                bias_learning_rate: 0.002,
+            },
+        }
+    }
+}
+
+impl Default for InEKFConfig {
+    fn default() -> Self {
+        Self::for_lsm6dso_and_lis2mdl(9.80665)
+    }
+}
+
 /// 6차원 우불변 칼만 필터 구조체
 pub struct RightInvariantInEKF {
     /// 공칭 자세 상태 \hat{R} \in SO(3)
@@ -47,18 +138,8 @@ pub struct RightInvariantInEKF {
     pub bias_gyro: [f32; 3],
     /// 6x6 오차 공분산 행렬 P (0..3: 자세 오차 \xi, 3..6: 바이어스 오차 \delta b)
     pub p: [[f32; 6]; 6],
-    /// 자이로 노이즈 분산
-    pub q_gyro: f32,
-    /// 자이로 바이어스 랜덤워크 분산
-    pub q_bias: f32,
-    /// 가속도계 관측 노이즈 분산
-    pub r_accel: f32,
-    /// 지자기 센서 관측 노이즈 분산
-    pub r_mag: f32,
-    /// 기준 중력 벡터 (NED/ENU 좌표계 기준, 기본값 [0, 0, 9.80665])
-    pub g_ref: [f32; 3],
-    /// 기준 지구 자기장 벡터
-    pub m_ref: [f32; 3],
+    /// 필터 설정 파라미터
+    pub config: InEKFConfig,
 
     // [정지 상태(Stillness / ZARU) 감지기 필드]
     pub is_stationary: bool,
@@ -76,32 +157,53 @@ impl Default for RightInvariantInEKF {
 }
 
 impl RightInvariantInEKF {
-    /// 초기 파라미터로 InEKF 인스턴스 생성 (const fn 지원)
-    pub const fn new() -> Self {
+    /// 명시적 설정을 지정하여 InEKF 인스턴스 생성
+    pub fn with_config(config: InEKFConfig) -> Self {
         let mut p = [[0.0f32; 6]; 6];
-        // 초기 공분산 설정 (자세 0.1 rad^2, 바이어스 0.01 (rad/s)^2)
-        p[0][0] = 0.1;
-        p[1][1] = 0.1;
-        p[2][2] = 0.1;
-        p[3][3] = 0.01;
-        p[4][4] = 0.01;
-        p[5][5] = 0.01;
+        p[0][0] = config.p_init_rot_var;
+        p[1][1] = config.p_init_rot_var;
+        p[2][2] = config.p_init_rot_var;
+        p[3][3] = config.p_init_bias_var;
+        p[4][4] = config.p_init_bias_var;
+        p[5][5] = config.p_init_bias_var;
+
+        let initial_accel = config.g_ref;
 
         Self {
             rot: So3::identity(),
             bias_gyro: [0.0; 3],
             p,
-            q_gyro: 1e-3, // 0.001 (rad/s)^2/Hz
-            q_bias: 1e-5, // 0.00001 (rad/s^2)^2/Hz
-            r_accel: 0.2, // 기본 가속도계 노이즈
-            r_mag: 0.1,   // 기본 지자기 센서 노이즈
-            g_ref: [0.0, 0.0, 9.80665],
-            m_ref: [0.35, 0.0, 0.45], // 표준 지구 자기장 정규화 벡터 (북향/하향 성분)
+            config,
             is_stationary: false,
             stationary_counter: 0,
             gyro_mean: [0.0; 3],
             gyro_var: 0.0,
-            accel_mean: [0.0, 0.0, 9.80665],
+            accel_mean: initial_accel,
+            accel_var: 0.0,
+        }
+    }
+
+    /// 기본 설정(LSM6DSO & LIS2MDL 표준 사양)으로 InEKF 인스턴스 생성 (const fn 지원)
+    pub const fn new() -> Self {
+        let config = InEKFConfig::for_lsm6dso_and_lis2mdl(9.80665);
+        let mut p = [[0.0f32; 6]; 6];
+        p[0][0] = config.p_init_rot_var;
+        p[1][1] = config.p_init_rot_var;
+        p[2][2] = config.p_init_rot_var;
+        p[3][3] = config.p_init_bias_var;
+        p[4][4] = config.p_init_bias_var;
+        p[5][5] = config.p_init_bias_var;
+
+        Self {
+            rot: So3::identity(),
+            bias_gyro: [0.0; 3],
+            p,
+            config,
+            is_stationary: false,
+            stationary_counter: 0,
+            gyro_mean: [0.0; 3],
+            gyro_var: 0.0,
+            accel_mean: config.g_ref,
             accel_var: 0.0,
         }
     }
@@ -119,38 +221,42 @@ impl RightInvariantInEKF {
     /// 가속도 및 자이로스코프의 1차 이동평균과 분산 추이를 관측하여 정지 상태를 판별.
     /// 정지 상태 시 자이로 바이어스를 실측값으로 정밀 흡수(ZARU)하고 Yaw 드리프트를 동결한다.
     pub fn update_stillness(&mut self, gyro_raw: [f32; 3], accel_mps2: [f32; 3]) -> bool {
-        const ALPHA: f32 = 0.05; // 100Hz 기준 약 20~50 샘플(0.2~0.5초) 시정수 지수이동평균
+        let alpha = self.config.stillness.alpha;
 
         let mut g_diff_sq = 0.0f32;
         let mut a_diff_sq = 0.0f32;
         for i in 0..3 {
             let diff_g = gyro_raw[i] - self.gyro_mean[i];
             g_diff_sq += diff_g * diff_g;
-            self.gyro_mean[i] += ALPHA * diff_g;
+            self.gyro_mean[i] += alpha * diff_g;
 
             let diff_a = accel_mps2[i] - self.accel_mean[i];
             a_diff_sq += diff_a * diff_a;
-            self.accel_mean[i] += ALPHA * diff_a;
+            self.accel_mean[i] += alpha * diff_a;
         }
 
-        self.gyro_var = (1.0 - ALPHA) * self.gyro_var + ALPHA * g_diff_sq;
-        self.accel_var = (1.0 - ALPHA) * self.accel_var + ALPHA * a_diff_sq;
+        self.gyro_var = (1.0 - alpha) * self.gyro_var + alpha * g_diff_sq;
+        self.accel_var = (1.0 - alpha) * self.accel_var + alpha * a_diff_sq;
 
         let a_norm = libm::sqrtf(
             self.accel_mean[0] * self.accel_mean[0]
                 + self.accel_mean[1] * self.accel_mean[1]
                 + self.accel_mean[2] * self.accel_mean[2],
         );
-        let g_diff = libm::fabsf(a_norm - 9.80665);
+        let g_target = libm::sqrtf(
+            self.config.g_ref[0] * self.config.g_ref[0]
+                + self.config.g_ref[1] * self.config.g_ref[1]
+                + self.config.g_ref[2] * self.config.g_ref[2],
+        );
+        let g_diff = libm::fabsf(a_norm - g_target);
 
-        // 3대 물리적 정지 조건:
-        // 1. 각속도 분산 < 0.0005 (rad/s)^2 (약 1.3 dps 이하 진동)
-        // 2. 가속도 분산 < 0.05 (m/s^2)^2 (선형 가속/충격 없음)
-        // 3. 중력 크기 오차 < 0.5 m/s^2 (순수 1.0g 중력장)
-        let is_still_instant = self.gyro_var < 0.0005 && self.accel_var < 0.05 && g_diff < 0.5;
+        // 물리적 정지 조건 (StillnessConfig 파라미터 판별):
+        let is_still_instant = self.gyro_var < self.config.stillness.gyro_var_threshold
+            && self.accel_var < self.config.stillness.accel_var_threshold
+            && g_diff < self.config.stillness.gravity_diff_threshold;
 
         if is_still_instant {
-            if self.stationary_counter < 30 {
+            if self.stationary_counter < self.config.stillness.stationary_debounce_count {
                 self.stationary_counter += 1;
             } else {
                 self.is_stationary = true;
@@ -163,9 +269,9 @@ impl RightInvariantInEKF {
         // 정지 상태일 때: ZARU(Zero Angular Rate Update)
         // 정지 중 계측되는 자이로 값은 100% 바이어스이므로 자이로 바이어스를 점진 흡수
         if self.is_stationary {
-            const BIAS_LEARN_RATE: f32 = 0.002;
+            let lr = self.config.stillness.bias_learning_rate;
             for i in 0..3 {
-                self.bias_gyro[i] += BIAS_LEARN_RATE * (gyro_raw[i] - self.bias_gyro[i]);
+                self.bias_gyro[i] += lr * (gyro_raw[i] - self.bias_gyro[i]);
             }
         }
 
@@ -250,8 +356,8 @@ impl RightInvariantInEKF {
 
         // Q * dt 더하기
         for i in 0..3 {
-            p_new[i][i] += self.q_gyro * dt;
-            p_new[i + 3][i + 3] += self.q_bias * dt;
+            p_new[i][i] += self.config.q_gyro * dt;
+            p_new[i + 3][i + 3] += self.config.q_bias * dt;
         }
 
         self.p = p_new;
@@ -260,13 +366,17 @@ impl RightInvariantInEKF {
     /// [2단계: 가속도계 중력 관측 갱신 (Accelerometer Update)]
     /// Right-Invariant 오차 모델: 혁신 z = \hat{R} * y_acc - g_ref, 상수 야코비 H = [-g_ref]_\times
     /// 가속도 바이어스는 기동 가속도와의 역학적 커플링 오동작을 방지하기 위해 추정하지 않음 (사용자 요구사항 반영).
-    /// 정지 상태에서는 중력 정렬을 강화(R=0.04)하고, 동적 기동 시에는 적응형 노이즈 스케일링으로 모션 왜곡을 차단한다.
+    /// 정지 상태에서는 중력 정렬을 강화하고, 동적 기동 시에는 적응형 노이즈 스케일링으로 모션 왜곡을 차단한다.
     pub fn update_accel(&mut self, accel_raw_mps2: [f32; 3]) -> bool {
         let acc_mag_sq = accel_raw_mps2[0] * accel_raw_mps2[0]
             + accel_raw_mps2[1] * accel_raw_mps2[1]
             + accel_raw_mps2[2] * accel_raw_mps2[2];
         let acc_mag = libm::sqrtf(acc_mag_sq);
-        let g_norm = 9.80665f32;
+        let g_norm = libm::sqrtf(
+            self.config.g_ref[0] * self.config.g_ref[0]
+                + self.config.g_ref[1] * self.config.g_ref[1]
+                + self.config.g_ref[2] * self.config.g_ref[2],
+        );
         let g_diff = libm::fabsf(acc_mag - g_norm);
 
         // 1. 극단적 외란(자유낙하, 강한 충격) 기각 (0.5g ~ 1.8g 범위)
@@ -276,14 +386,14 @@ impl RightInvariantInEKF {
 
         // 2. 적응형 측정 공분산(Adaptive Noise Covariance Scaling)
         let r_noise = if self.is_stationary {
-            // 정지 상태: 순수 중력장이므로 측정 노이즈를 0.04로 축소하여 Roll/Pitch 신속 정렬
-            0.04
+            // 정지 상태: 순수 중력장이므로 정지용 측정 노이즈로 축소하여 Roll/Pitch 신속 정렬
+            self.config.r_accel_stationary
         } else {
             // 동적 기동 상태: 선형 가속도 오차와 가속도 분산에 비례하여 노이즈를 수십 배 확대, 자이로 적분에 주도권 위임
-            self.r_accel * (1.0 + 8.0 * g_diff + 20.0 * self.accel_var)
+            self.config.r_accel * (1.0 + 8.0 * g_diff + 20.0 * self.accel_var)
         };
 
-        self.update_vector_observation(accel_raw_mps2, self.g_ref, r_noise)
+        self.update_vector_observation(accel_raw_mps2, self.config.g_ref, r_noise)
     }
 
     /// [3단계: 지자기 센서 관측 갱신 (Decoupled 1D Yaw Update)]
@@ -307,7 +417,7 @@ impl RightInvariantInEKF {
         // 4. Decoupled 1D 스칼라 칼만 갱신 (오직 Yaw 오차 \xi_z 만 관측)
         //    관측 야코비 H = [0, 0, 1, 0, 0, 0] (1x6)
         //    혁신 공분산 S = H * P * H^T + R = P[2][2] + R_mag
-        let s = self.p[2][2] + self.r_mag;
+        let s = self.p[2][2] + self.config.r_mag;
         if s < 1e-6 {
             return false;
         }
@@ -359,7 +469,7 @@ impl RightInvariantInEKF {
                     sum += ap[i][k] * a[j][k]; // A^T[k][j] = A[j][k]
                 }
                 // K * R * K^T 성분 더하기
-                p_new[i][j] = sum + k_gain[i] * k_gain[j] * self.r_mag;
+                p_new[i][j] = sum + k_gain[i] * k_gain[j] * self.config.r_mag;
             }
         }
 

@@ -9,7 +9,6 @@ use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{self, Ethernet, PacketQueue};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::peripherals::{ETH, I2C1};
-use embassy_stm32::time::Hertz;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
@@ -17,7 +16,7 @@ use embedded_io_async::Write as _;
 use heapless::String;
 use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::uid;
-use nucleo_bsp::BoardLeds;
+use nucleo_bsp::{BoardLeds, BoardRmiiPins, I2C_FAST_MODE_HZ};
 use static_cell::StaticCell;
 
 // 1. 하드웨어 인터럽트 바인딩 (I2C1 + ETH)
@@ -133,7 +132,7 @@ async fn main(spawner: Spawner) {
         Irqs,
         p.DMA1_CH0,
         p.DMA1_CH1,
-        Hertz(400_000),
+        I2C_FAST_MODE_HZ,
         Default::default(),
     );
     {
@@ -148,10 +147,7 @@ async fn main(spawner: Spawner) {
     // [3] 이더넷 RMII LAN8742A 드라이버 초기화 (STM32 고유 UID 기반 EUI-48 MAC 주소 생성)
     let mac_addr = uid::get_unique_mac_address();
     let queue = PACKET_QUEUE.init(PacketQueue::new());
-    let eth_device = Ethernet::new(
-        queue,
-        p.ETH,
-        Irqs,
+    let rmii_pins = BoardRmiiPins::new(
         p.PA1,  // ref_clk
         p.PA2,  // mdio
         p.PC1,  // mdc
@@ -161,6 +157,21 @@ async fn main(spawner: Spawner) {
         p.PG13, // tx_d0
         p.PB13, // tx_d1
         p.PG11, // tx_en
+    );
+
+    let eth_device = Ethernet::new(
+        queue,
+        p.ETH,
+        Irqs,
+        rmii_pins.ref_clk,
+        rmii_pins.mdio,
+        rmii_pins.mdc,
+        rmii_pins.crs_dv,
+        rmii_pins.rx_d0,
+        rmii_pins.rx_d1,
+        rmii_pins.tx_d0,
+        rmii_pins.tx_d1,
+        rmii_pins.tx_en,
         GenericSMI::new(0),
         mac_addr,
     );

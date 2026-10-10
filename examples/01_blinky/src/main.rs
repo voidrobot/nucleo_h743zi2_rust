@@ -3,8 +3,13 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use nucleo_bsp::BoardLeds;
+
+/// 각 LED 온보드 점멸 유지 시간
+const LED_BLINK_DURATION: Duration = Duration::from_millis(300);
+/// 전체 3색 LED 순차 점멸 후 다음 주기 대기 시간
+const CYCLE_PAUSE_DURATION: Duration = Duration::from_millis(500);
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -27,19 +32,19 @@ async fn main(_spawner: Spawner) {
 
         // 1. Green LED (PB0)
         leds.green.set_high();
-        Timer::after_millis(300).await;
+        Timer::after(LED_BLINK_DURATION).await;
         leds.green.set_low();
 
         // 2. Yellow LED (PE1)
         leds.yellow.set_high();
-        Timer::after_millis(300).await;
+        Timer::after(LED_BLINK_DURATION).await;
         leds.yellow.set_low();
 
         // 3. Red LED (PB14)
         leds.red.set_high();
-        Timer::after_millis(300).await;
+        Timer::after(LED_BLINK_DURATION).await;
         leds.red.set_low();
 
-        Timer::after_millis(500).await;
+        Timer::after(CYCLE_PAUSE_DURATION).await;
     }
 }

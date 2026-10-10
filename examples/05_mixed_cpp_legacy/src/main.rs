@@ -8,12 +8,20 @@ use panic_probe as _;
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::i2c::{self, I2c};
-use embassy_stm32::time::Hertz;
 use embassy_time::{Duration, Ticker};
 use nucleo_bsp::iks01a3::*;
-use nucleo_bsp::BoardLeds;
+use nucleo_bsp::{BoardLeds, I2C_FAST_MODE_HZ};
 
 use mixed_cpp_legacy_05::cpp_bridge::SafeBiquadFilter;
+
+/// Biquad 필터 및 센서 취득 샘플링 주파수 (Hz)
+const SAMPLING_RATE_HZ: u64 = 100;
+/// 버터워스 저역통과 필터 차단 주파수 (Hz)
+const FILTER_CUTOFF_HZ: f32 = 5.0;
+/// 텔레메트리 RTT 출력 주기 (스텝 수, 100스텝 = 1초)
+const TELEMETRY_INTERVAL_STEPS: u32 = 100;
+/// 하트비트 LED 토글 주기 (스텝 수, 50스텝 = 0.5초)
+const HEARTBEAT_INTERVAL_STEPS: u32 = 50;
 
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
@@ -38,7 +46,7 @@ async fn main(_spawner: Spawner) {
         Irqs,
         p.DMA1_CH0,
         p.DMA1_CH1,
-        Hertz(400_000),
+        I2C_FAST_MODE_HZ,
         Default::default(),
     );
     info!("I2C1 버스 400kHz 초기화 완료 (PB8/PB9)");
@@ -77,15 +85,21 @@ async fn main(_spawner: Spawner) {
     // 3. 레거시 C++ Biquad 필터 인스턴스 초기화 (Zero-Allocation 인라인 스택 할당)
     // 샘플링 주파수: 100 Hz, 차단 주파수: 5 Hz (고주파 노이즈 제거), Q: 1/√2 (Butterworth)
     let q_butterworth = core::f32::consts::FRAC_1_SQRT_2;
-    let mut filter_x = SafeBiquadFilter::new_lpf(100.0, 5.0, q_butterworth);
-    let mut filter_y = SafeBiquadFilter::new_lpf(100.0, 5.0, q_butterworth);
-    let mut filter_z = SafeBiquadFilter::new_lpf(100.0, 5.0, q_butterworth);
-    info!("C++ BiquadFilter 3축(X, Y, Z) 인스턴스 초기화 완료 (Fs=100Hz, Fc=5Hz)");
+    let mut filter_x =
+        SafeBiquadFilter::new_lpf(SAMPLING_RATE_HZ as f32, FILTER_CUTOFF_HZ, q_butterworth);
+    let mut filter_y =
+        SafeBiquadFilter::new_lpf(SAMPLING_RATE_HZ as f32, FILTER_CUTOFF_HZ, q_butterworth);
+    let mut filter_z =
+        SafeBiquadFilter::new_lpf(SAMPLING_RATE_HZ as f32, FILTER_CUTOFF_HZ, q_butterworth);
+    info!(
+        "C++ BiquadFilter 3축(X, Y, Z) 인스턴스 초기화 완료 (Fs={}Hz, Fc={}Hz)",
+        SAMPLING_RATE_HZ, FILTER_CUTOFF_HZ
+    );
 
     leds.green.set_low();
 
     // 4. 100 Hz (10ms) 비동기 센서 취득 및 레거시 C++ 필터 실시간 연동 루프
-    let mut ticker = Ticker::every(Duration::from_hz(100));
+    let mut ticker = Ticker::every(Duration::from_hz(SAMPLING_RATE_HZ));
     let mut count = 0u32;
     let mut accel_buf = [0u8; 6];
 
@@ -117,7 +131,7 @@ async fn main(_spawner: Spawner) {
         let az_filt = filter_z.process(az_mg);
 
         // 매 100스텝(1초)마다 RTT로 원시 노이즈 데이터 vs C++ 필터링 데이터 비교 출력
-        if count.is_multiple_of(100) {
+        if count.is_multiple_of(TELEMETRY_INTERVAL_STEPS) {
             info!(
                 "[100Hz #{}] RAW: [{=f32}, {=f32}, {=f32}] mg | C++ LPF: [{=f32}, {=f32}, {=f32}] mg",
                 count, ax_mg, ay_mg, az_mg, ax_filt, ay_filt, az_filt
@@ -125,7 +139,7 @@ async fn main(_spawner: Spawner) {
         }
 
         // 50스텝(0.5초)마다 녹색 LED 토글 (하트비트)
-        if count.is_multiple_of(50) {
+        if count.is_multiple_of(HEARTBEAT_INTERVAL_STEPS) {
             leds.green.toggle();
         }
     }

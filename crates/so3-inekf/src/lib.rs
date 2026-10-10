@@ -4,7 +4,7 @@
 pub mod inekf;
 pub mod so3;
 
-pub use inekf::RightInvariantInEKF;
+pub use inekf::{InEKFConfig, RightInvariantInEKF, StillnessConfig};
 pub use so3::So3;
 
 #[cfg(test)]
@@ -164,5 +164,17 @@ mod tests {
             "지자기 센서 갱신 후 Yaw 수렴 검증: yaw={}",
             yaw
         );
+    }
+
+    #[test]
+    fn test_inekf_config_builder_and_datasheet_derivation() {
+        let g = 9.80665;
+        let config = InEKFConfig::for_lsm6dso_and_lis2mdl(g);
+        assert_eq!(config.g_ref[2], g);
+
+        let filter = RightInvariantInEKF::with_config(config);
+        assert_eq!(filter.config.g_ref[2], g);
+        assert_eq!(filter.p[0][0], 0.1);
+        assert_eq!(filter.p[3][3], 0.01);
     }
 }

@@ -24,6 +24,12 @@ pub mod lsm6dso {
         raw as f32 * ACCEL_MG_PER_LSB
     }
 
+    /// 원시 가속도 ADC 값 -> SI 단위 가속도 (m/s^2) 고정밀 변환 (f32)
+    #[inline]
+    pub fn raw_to_mps2_f32(raw: i16) -> f32 {
+        raw as f32 * (ACCEL_MG_PER_LSB * 0.001 * super::constants::STANDARD_GRAVITY)
+    }
+
     /// 원시 각속도 ADC 값 -> 초당 각도(dps) 단위 변환 (정수 연산)
     #[inline]
     pub fn raw_to_dps(raw: i16) -> i16 {

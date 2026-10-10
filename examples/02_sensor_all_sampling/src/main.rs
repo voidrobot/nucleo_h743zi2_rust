@@ -6,12 +6,11 @@ use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::peripherals::I2C1;
-use embassy_stm32::time::Hertz;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use nucleo_bsp::iks01a3::*;
-use nucleo_bsp::BoardLeds;
+use nucleo_bsp::{BoardLeds, I2C_FAST_MODE_HZ};
 
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<I2C1>;
@@ -106,7 +105,7 @@ async fn main(spawner: Spawner) {
         Irqs,
         p.DMA1_CH0,
         p.DMA1_CH1,
-        Hertz(400_000), // Fast Mode 400kHz
+        I2C_FAST_MODE_HZ,
         Default::default(),
     );
 

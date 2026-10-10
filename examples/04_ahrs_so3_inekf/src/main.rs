@@ -19,7 +19,6 @@ use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{self, Ethernet, PacketQueue};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::peripherals::{ETH, I2C1};
-use embassy_stm32::time::Hertz;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
@@ -27,9 +26,16 @@ use embedded_io_async::Write as _;
 use heapless::String;
 use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::uid;
-use nucleo_bsp::BoardLeds;
-use so3_inekf::RightInvariantInEKF;
+use nucleo_bsp::{BoardLeds, BoardRmiiPins, I2C_FAST_MODE_HZ};
+use so3_inekf::{InEKFConfig, RightInvariantInEKF};
 use static_cell::StaticCell;
+
+/// InEKF 최소/최대 시간 증분 클램핑 경계 (초)
+const MIN_INTEGRATION_DT_S: f32 = 0.001;
+const MAX_INTEGRATION_DT_S: f32 = 0.050;
+
+/// 지자기 유효성 검증 최소 자기장 크기 제곱 임계값 (mgauss^2)
+const MIN_VALID_MAG_NORM_SQ: f32 = 100.0;
 
 // 1. 하드웨어 인터럽트 바인딩 (I2C1 + ETH)
 bind_interrupts!(struct Irqs {
@@ -177,7 +183,7 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
         Irqs,
         p.DMA1_CH0,
         p.DMA1_CH1,
-        Hertz(400_000),
+        I2C_FAST_MODE_HZ,
         Default::default(),
     );
 
@@ -189,10 +195,12 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
     // 센서 하드웨어 초기화
     init_sensors().await;
 
-    // InEKF 필터 초기화
+    // InEKF 필터 초기화 (데이터시트 기반 노이즈 공분산 파라미터 적용)
     {
         let mut filter = INEKF_FILTER.lock().await;
-        *filter = RightInvariantInEKF::new();
+        *filter = RightInvariantInEKF::with_config(InEKFConfig::for_lsm6dso_and_lis2mdl(
+            STANDARD_GRAVITY,
+        ));
     }
 
     // NVIC CEC IRQ 바인딩 및 고우선순위(P6) 설정
@@ -208,11 +216,7 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
     // [Task 3] LAN8742A RMII 이더넷 드라이버 초기화 (STM32 고유 UID 기반 EUI-48 MAC 주소)
     let mac_addr = uid::get_unique_mac_address();
     let queue = PACKET_QUEUE.init(PacketQueue::new());
-
-    let eth_device = Ethernet::new(
-        queue,
-        p.ETH,
-        Irqs,
+    let rmii_pins = BoardRmiiPins::new(
         p.PA1,  // RMII_REF_CLK
         p.PA2,  // RMII_MDIO
         p.PC1,  // RMII_MDC
@@ -222,6 +226,21 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
         p.PG13, // RMII_TXD0
         p.PB13, // RMII_TXD1
         p.PG11, // RMII_TX_EN
+    );
+
+    let eth_device = Ethernet::new(
+        queue,
+        p.ETH,
+        Irqs,
+        rmii_pins.ref_clk,
+        rmii_pins.mdio,
+        rmii_pins.mdc,
+        rmii_pins.crs_dv,
+        rmii_pins.rx_d0,
+        rmii_pins.rx_d1,
+        rmii_pins.tx_d0,
+        rmii_pins.tx_d1,
+        rmii_pins.tx_en,
         GenericSMI::new(0),
         mac_addr,
     );
@@ -356,14 +375,15 @@ async fn task_imu_high_priority_rt() {
         let ax_mg = lsm6dso::raw_to_mg(ax_raw);
         let ay_mg = lsm6dso::raw_to_mg(ay_raw);
         let az_mg = lsm6dso::raw_to_mg(az_raw);
+        // 정수 나눗셈/절삭 오차 없이 직접 단정도 부동소수점 가속도(m/s^2)로 산출
         let accel_mps2 = [
-            ax_mg as f32 * 0.001 * STANDARD_GRAVITY,
-            ay_mg as f32 * 0.001 * STANDARD_GRAVITY,
-            az_mg as f32 * 0.001 * STANDARD_GRAVITY,
+            lsm6dso::raw_to_mps2_f32(ax_raw),
+            lsm6dso::raw_to_mps2_f32(ay_raw),
+            lsm6dso::raw_to_mps2_f32(az_raw),
         ];
 
-        // 2. SO(3) Right-Invariant InEKF 연산 (실측 가변 dt_s 반영 및 0.001~0.05초 안전 클램핑)
-        let dt_s = (dt_us as f32 * 1e-6).clamp(0.001, 0.05);
+        // 2. SO(3) Right-Invariant InEKF 연산 (실측 가변 dt_s 반영 및 안전 클램핑)
+        let dt_s = (dt_us as f32 * 1e-6).clamp(MIN_INTEGRATION_DT_S, MAX_INTEGRATION_DT_S);
         let mut filter = INEKF_FILTER.lock().await;
         // 정지 상태(Stillness / ZARU) 감지 및 바이어스 적응 갱신
         filter.update_stillness(gyro_radps, accel_mps2);
@@ -430,12 +450,12 @@ async fn task_mag_sampling() {
         let my_mgauss = lis2mdl::raw_to_mgauss(my_raw);
         let mz_mgauss = lis2mdl::raw_to_mgauss(mz_raw);
 
-        let mx_f = mx_mgauss as f32;
-        let my_f = my_mgauss as f32;
-        let mz_f = mz_mgauss as f32;
+        let mx_f = lis2mdl::raw_to_mgauss_f32(mx_raw);
+        let my_f = lis2mdl::raw_to_mgauss_f32(my_raw);
+        let mz_f = lis2mdl::raw_to_mgauss_f32(mz_raw);
         let norm_sq = mx_f * mx_f + my_f * my_f + mz_f * mz_f;
 
-        if norm_sq > 100.0 {
+        if norm_sq > MIN_VALID_MAG_NORM_SQ {
             let inv_norm = 1.0 / libm::sqrtf(norm_sq);
             let mag_norm = [mx_f * inv_norm, my_f * inv_norm, mz_f * inv_norm];
 
