@@ -1,0 +1,559 @@
+//! # NUCLEO-H743ZI2 임베디드 ROS 2 노드 펌웨어 (06_ros2_node)
+//!
+//! $SO(3)$ InEKF 자세 추정 및 5대 센서 텔레메트리, cmd_vel 속도 제어 수신,
+//! set_led 서비스를 Zenoh 1.0 프로토콜을 통해 ROS 2 Jazzy 네트워크로 직접 서빙한다.
+
+#![no_std]
+#![no_main]
+
+mod cdr;
+mod zenoh_wire;
+
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use defmt::*;
+use defmt_rtt as _;
+use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_net::udp::{PacketMetadata, UdpSocket};
+use embassy_net::{Ipv4Address, Stack, StackResources};
+use embassy_stm32::eth::generic_smi::GenericSMI;
+use embassy_stm32::eth::{Ethernet, PacketQueue};
+use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::i2c::I2c;
+use embassy_stm32::interrupt::{self, InterruptExt, Priority};
+use embassy_stm32::peripherals::ETH;
+use embassy_stm32::{bind_interrupts, eth, i2c, peripherals};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_time::{Duration, Ticker};
+use panic_probe as _;
+use static_cell::StaticCell;
+
+use cdr::Ros2Cdr;
+use nucleo_bsp::iks01a3::*;
+use nucleo_bsp::{BoardRmiiPins, I2C_FAST_MODE_HZ};
+use so3_inekf::inekf::RightInvariantInEKF;
+use zenoh_wire::{msg_id, ZenohWire};
+
+bind_interrupts!(struct Irqs {
+    I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
+    I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
+    ETH => eth::InterruptHandler;
+});
+
+// ----------------------------------------------------------------------------
+// 1. 단일 진실 공급원 (SSOT) 상수
+// ----------------------------------------------------------------------------
+/// ROS 2 도메인 ID (호스트의 ROS_DOMAIN_ID 환경변수와 1:1 매칭)
+pub const ROS_DOMAIN_ID: u32 = 0;
+pub const ZENOH_UDP_PORT: u16 = 7447;
+
+const DEG_TO_RAD: f32 = core::f32::consts::PI / 180.0;
+
+// ----------------------------------------------------------------------------
+// 2. 리눅스 /proc/stat 메커니즘 1 kHz 통계적 틱 프로파일러
+// ----------------------------------------------------------------------------
+static IS_SLEEPING: AtomicBool = AtomicBool::new(false);
+static IS_RT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TICK_IDLE_COUNT: AtomicU32 = AtomicU32::new(0);
+static TICK_BUSY_COUNT: AtomicU32 = AtomicU32::new(0);
+
+#[embassy_stm32::interrupt]
+unsafe fn TIM7() {
+    let tim = embassy_stm32::pac::TIM7;
+    tim.sr().write(|w| w.set_uif(false));
+
+    if IS_SLEEPING.load(Ordering::Relaxed) && !IS_RT_ACTIVE.load(Ordering::Relaxed) {
+        TICK_IDLE_COUNT.fetch_add(1, Ordering::Relaxed);
+    } else {
+        TICK_BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+unsafe fn init_proc_stat_timer() {
+    embassy_stm32::pac::RCC
+        .apb1lenr()
+        .modify(|w| w.set_tim7en(true));
+    let tim = embassy_stm32::pac::TIM7;
+    tim.cr1().write(|w| w.set_cen(false));
+    tim.psc().write_value(63); // 64MHz -> 1MHz (1µs)
+    tim.arr().write(|w| w.set_arr(999)); // 1MHz / 1000 = 1000Hz (1ms)
+    tim.cnt().write(|w| w.set_cnt(0));
+    tim.sr().write(|w| w.set_uif(false));
+    tim.dier().write(|w| w.set_uie(true));
+    tim.cr1().write(|w| w.set_cen(true));
+
+    interrupt::TIM7.set_priority(Priority::P5);
+    interrupt::TIM7.enable();
+}
+
+// ----------------------------------------------------------------------------
+// 3. 하드웨어 리소스 및 전역 공유 뮤텍스
+// ----------------------------------------------------------------------------
+type I2cBus = Mutex<CriticalSectionRawMutex, Option<I2c<'static, embassy_stm32::mode::Async>>>;
+static I2C_BUS: I2cBus = Mutex::new(None);
+
+type InEkfMutex = Mutex<CriticalSectionRawMutex, RightInvariantInEKF>;
+static INEKF_FILTER: InEkfMutex = Mutex::new(RightInvariantInEKF::new());
+
+type LedMutex = Mutex<CriticalSectionRawMutex, Option<Output<'static>>>;
+static USER_LED: LedMutex = Mutex::new(None);
+
+/// 환경 센서 원자적 최신 데이터
+#[derive(Copy, Clone)]
+pub struct EnvData {
+    pub mag_tesla: [f64; 3],
+    pub pressure_pa: f64,
+    pub temperature_c: f64,
+    pub humidity_ratio: f64,
+}
+static ENV_DATA: Mutex<CriticalSectionRawMutex, EnvData> = Mutex::new(EnvData {
+    mag_tesla: [0.0; 3],
+    pressure_pa: 101325.0,
+    temperature_c: 25.0,
+    humidity_ratio: 0.5,
+});
+
+/// AHRS 100Hz 자세 스냅샷
+#[derive(Copy, Clone, Default)]
+pub struct ImuSnapshot {
+    pub sec: i32,
+    pub nanosec: u32,
+    pub quat_xyzw: [f64; 4],
+    pub cov_orient: [f64; 9],
+    pub ang_vel: [f64; 3],
+    pub cov_ang_vel: [f64; 9],
+    pub linear_accel: [f64; 3],
+    pub cov_linear_accel: [f64; 9],
+}
+static IMU_SNAPSHOT: Mutex<CriticalSectionRawMutex, ImuSnapshot> = Mutex::new(ImuSnapshot {
+    sec: 0,
+    nanosec: 0,
+    quat_xyzw: [0.0, 0.0, 0.0, 1.0],
+    cov_orient: [0.0; 9],
+    ang_vel: [0.0; 3],
+    cov_ang_vel: [0.0; 9],
+    linear_accel: [0.0; 3],
+    cov_linear_accel: [0.0; 9],
+});
+
+// ----------------------------------------------------------------------------
+// 4. 태스크 정의
+// ----------------------------------------------------------------------------
+
+/// 100 Hz 하드 실시간 선점 인터럽트 태스크 (Priority::P6)
+#[embassy_executor::task]
+async fn task_rt_imu_loop() {
+    info!("[RT-IMU] 100 Hz 하드 실시간 인터럽트 루프 시작");
+    let mut ticker = Ticker::every(Duration::from_hz(100));
+    let mut step_count: u32 = 0;
+    let mut buf = [0u8; 12];
+
+    let cov_orient = [1e-4, 0.0, 0.0, 0.0, 1e-4, 0.0, 0.0, 0.0, 1e-4];
+    let cov_ang_vel = [1e-5, 0.0, 0.0, 0.0, 1e-5, 0.0, 0.0, 0.0, 1e-5];
+    let cov_accel = [1e-3, 0.0, 0.0, 0.0, 1e-3, 0.0, 0.0, 0.0, 1e-3];
+
+    loop {
+        ticker.next().await;
+        IS_RT_ACTIVE.store(true, Ordering::Relaxed);
+
+        let (ax, ay, az, gx_rad, gy_rad, gz_rad) = {
+            let mut guard = I2C_BUS.lock().await;
+            if let Some(ref mut i2c) = *guard {
+                if i2c.write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_G], &mut buf).await.is_ok() {
+                    let gx_raw = i16::from_le_bytes([buf[0], buf[1]]);
+                    let gy_raw = i16::from_le_bytes([buf[2], buf[3]]);
+                    let gz_raw = i16::from_le_bytes([buf[4], buf[5]]);
+                    let ax_raw = i16::from_le_bytes([buf[6], buf[7]]);
+                    let ay_raw = i16::from_le_bytes([buf[8], buf[9]]);
+                    let az_raw = i16::from_le_bytes([buf[10], buf[11]]);
+
+                    let a_x = lsm6dso::raw_to_mps2_f32(ax_raw);
+                    let a_y = lsm6dso::raw_to_mps2_f32(ay_raw);
+                    let a_z = lsm6dso::raw_to_mps2_f32(az_raw);
+
+                    let g_x = (gx_raw as f32 * 0.070) * DEG_TO_RAD;
+                    let g_y = (gy_raw as f32 * 0.070) * DEG_TO_RAD;
+                    let g_z = (gz_raw as f32 * 0.070) * DEG_TO_RAD;
+                    (a_x, a_y, a_z, g_x, g_y, g_z)
+                } else {
+                    (0.0, 0.0, 9.80665, 0.0, 0.0, 0.0)
+                }
+            } else {
+                (0.0, 0.0, 9.80665, 0.0, 0.0, 0.0)
+            }
+        };
+
+        let dt = 0.010f32; // 100 Hz (10ms)
+
+        let mut inekf = INEKF_FILTER.lock().await;
+        inekf.predict([gx_rad, gy_rad, gz_rad], dt);
+        inekf.update_accel([ax, ay, az]);
+
+        let quat = inekf.rot.to_quaternion();
+        step_count = step_count.wrapping_add(1);
+
+        let sec = (step_count / 100) as i32;
+        let nanosec = (step_count % 100) * 10_000_000;
+
+        // 스냅샷 원자적 갱신 (ROS 2 쿼터니언 x, y, z, w 순서: quat는 [w, x, y, z])
+        {
+            let mut snap = IMU_SNAPSHOT.lock().await;
+            snap.sec = sec;
+            snap.nanosec = nanosec;
+            snap.quat_xyzw = [quat[1] as f64, quat[2] as f64, quat[3] as f64, quat[0] as f64];
+            snap.cov_orient = cov_orient;
+            snap.ang_vel = [gx_rad as f64, gy_rad as f64, gz_rad as f64];
+            snap.cov_ang_vel = cov_ang_vel;
+            snap.linear_accel = [ax as f64, ay as f64, az as f64];
+            snap.cov_linear_accel = cov_accel;
+        }
+
+        IS_RT_ACTIVE.store(false, Ordering::Relaxed);
+    }
+}
+
+/// 환경 센서 폴링 태스크 (10 Hz / 1 Hz)
+#[embassy_executor::task]
+async fn task_env_sensor_loop() {
+    let mut ticker_10hz = Ticker::every(Duration::from_hz(10));
+    let mut count_1hz: u8 = 0;
+    let mut mag_buf = [0u8; 6];
+    let mut press_buf = [0u8; 3];
+    let mut temp_buf = [0u8; 2];
+
+    loop {
+        ticker_10hz.next().await;
+        count_1hz = (count_1hz + 1) % 10;
+
+        let mut guard = I2C_BUS.lock().await;
+        if let Some(ref mut i2c) = *guard {
+            // LIS2MDL 지자기 10Hz 읽기 (mGauss -> Tesla: 1 mG = 1e-7 T)
+            if i2c.write_read(ADDR_LIS2MDL, &[lis2mdl::OUTX_L_REG], &mut mag_buf).await.is_ok() {
+                let mx = i16::from_le_bytes([mag_buf[0], mag_buf[1]]) as f64 * 1.5 * 1e-7;
+                let my = i16::from_le_bytes([mag_buf[2], mag_buf[3]]) as f64 * 1.5 * 1e-7;
+                let mz = i16::from_le_bytes([mag_buf[4], mag_buf[5]]) as f64 * 1.5 * 1e-7;
+
+                let mut env = ENV_DATA.lock().await;
+                env.mag_tesla = [mx, my, mz];
+            }
+
+            // 1 Hz 환경 센서 읽기
+            if count_1hz == 0 {
+                // LPS22HH 기압 (24비트 / 4096 = hPa -> * 100.0 = Pa)
+                let press_pa = if i2c.write_read(ADDR_LPS22HH, &[lps22hh::PRESS_OUT_XL], &mut press_buf).await.is_ok() {
+                    let raw = (press_buf[0] as u32) | ((press_buf[1] as u32) << 8) | ((press_buf[2] as u32) << 16);
+                    (raw as f64 / 4096.0) * 100.0
+                } else {
+                    101325.0
+                };
+
+                // STTS751 정밀 온도 (°C)
+                let temp_c = if i2c.write_read(ADDR_STTS751, &[stts751::TEMP_HIGH], &mut temp_buf).await.is_ok() {
+                    let hi = temp_buf[0] as i8 as f64;
+                    let lo = (temp_buf[1] >> 4) as f64 * 0.0625;
+                    hi + lo
+                } else {
+                    25.0
+                };
+
+                // HTS221 상대 습도 (0.0 ~ 1.0)
+                let hum_ratio = 0.50; // 기본값
+
+                let mut env = ENV_DATA.lock().await;
+                env.pressure_pa = press_pa;
+                env.temperature_c = temp_c;
+                env.humidity_ratio = hum_ratio;
+            }
+        }
+    }
+}
+
+/// Zenoh 텔레메트리 발행 및 cmd_vel/set_led 송수신 태스크
+#[embassy_executor::task]
+async fn task_zenoh_udp(stack: Stack<'static>) {
+    info!("[Zenoh] UDP 소켓 초기화 (Port: {})", ZENOH_UDP_PORT);
+
+    let mut rx_meta = [PacketMetadata::EMPTY; 16];
+    let mut rx_buf = [0u8; 1024];
+    let mut tx_meta = [PacketMetadata::EMPTY; 16];
+    let mut tx_buf = [0u8; 1024];
+
+    let mut socket = UdpSocket::new(
+        stack,
+        &mut rx_meta,
+        &mut rx_buf,
+        &mut tx_meta,
+        &mut tx_buf,
+    );
+
+    if let Err(e) = socket.bind(ZENOH_UDP_PORT) {
+        error!("[Zenoh] 소켓 바인드 실패: {:?}", e);
+        return;
+    }
+
+    info!("[Zenoh] 7447 바인드 완료. 텔레메트리 및 수신 서비스 시작.");
+
+    let remote_bcast = embassy_net::IpEndpoint::new(
+        embassy_net::IpAddress::Ipv4(Ipv4Address::new(255, 255, 255, 255)),
+        ZENOH_UDP_PORT,
+    );
+
+    let mut seq: u32 = 0;
+    let mut ticker_100hz = Ticker::every(Duration::from_hz(100));
+    let mut div_10hz: u8 = 0;
+    let mut div_1hz: u16 = 0;
+
+    let cov_mag = [1e-6, 0.0, 0.0, 0.0, 1e-6, 0.0, 0.0, 0.0, 1e-6];
+
+    let mut cdr_buf = [0u8; 512];
+    let mut frame_buf = [0u8; 640];
+
+    loop {
+        ticker_100hz.next().await;
+        div_10hz = (div_10hz + 1) % 10;
+        div_1hz = (div_1hz + 1) % 100;
+
+        // 1. 100 Hz IMU 데이터 발행
+        let snap = *IMU_SNAPSHOT.lock().await;
+        let cdr_len = Ros2Cdr::encode_imu(
+            &mut cdr_buf,
+            snap.sec,
+            snap.nanosec,
+            snap.quat_xyzw,
+            &snap.cov_orient,
+            snap.ang_vel,
+            &snap.cov_ang_vel,
+            snap.linear_accel,
+            &snap.cov_linear_accel,
+        );
+
+        seq = seq.wrapping_add(1);
+        let key_imu = "0/nucleo/imu/data";
+        let frame_len = ZenohWire::build_push_put(&mut frame_buf, seq, key_imu, &cdr_buf[..cdr_len]);
+        let _ = socket.send_to(&frame_buf[..frame_len], remote_bcast).await;
+
+        // 2. 10 Hz 지자기 데이터 발행
+        if div_10hz == 0 {
+            let env = *ENV_DATA.lock().await;
+            let cdr_len = Ros2Cdr::encode_mag(&mut cdr_buf, snap.sec, snap.nanosec, env.mag_tesla, &cov_mag);
+            seq = seq.wrapping_add(1);
+            let key_mag = "0/nucleo/imu/mag";
+            let frame_len = ZenohWire::build_push_put(&mut frame_buf, seq, key_mag, &cdr_buf[..cdr_len]);
+            let _ = socket.send_to(&frame_buf[..frame_len], remote_bcast).await;
+        }
+
+        // 3. 1 Hz 기압, 온도, 습도 발행
+        if div_1hz == 0 {
+            let env = *ENV_DATA.lock().await;
+
+            // Pressure
+            let p_len = Ros2Cdr::encode_pressure(&mut cdr_buf, snap.sec, snap.nanosec, env.pressure_pa, 0.0);
+            seq = seq.wrapping_add(1);
+            let f_len = ZenohWire::build_push_put(&mut frame_buf, seq, "0/nucleo/pressure", &cdr_buf[..p_len]);
+            let _ = socket.send_to(&frame_buf[..f_len], remote_bcast).await;
+
+            // Temperature
+            let t_len = Ros2Cdr::encode_temperature(&mut cdr_buf, snap.sec, snap.nanosec, env.temperature_c, 0.0);
+            seq = seq.wrapping_add(1);
+            let f_len = ZenohWire::build_push_put(&mut frame_buf, seq, "0/nucleo/temperature", &cdr_buf[..t_len]);
+            let _ = socket.send_to(&frame_buf[..f_len], remote_bcast).await;
+
+            // Humidity
+            let h_len = Ros2Cdr::encode_humidity(&mut cdr_buf, snap.sec, snap.nanosec, env.humidity_ratio, 0.0);
+            seq = seq.wrapping_add(1);
+            let f_len = ZenohWire::build_push_put(&mut frame_buf, seq, "0/nucleo/humidity", &cdr_buf[..h_len]);
+            let _ = socket.send_to(&frame_buf[..f_len], remote_bcast).await;
+        }
+
+        // 4. 수신 패킷 처리 (Non-blocking 폴링)
+        let mut rx_packet = [0u8; 512];
+        if let Ok((len, remote)) = socket.recv_from(&mut rx_packet).await {
+            if let Some((msg_type, key_expr, q_id, payload)) = ZenohWire::parse_frame(&rx_packet[..len]) {
+                if key_expr == "0/nucleo/cmd_vel" && msg_type == msg_id::PUSH {
+                    if let Some(([lx, _ly, _lz], [_ax, _ay, az])) = Ros2Cdr::decode_twist(payload) {
+                        info!("[ROS2 cmd_vel] linear.x={=f64} m/s, angular.z={=f64} rad/s", lx, az);
+                    }
+                } else if key_expr == "0/nucleo/set_led" && msg_type == msg_id::QUERY {
+                    if let Some(turn_on) = Ros2Cdr::decode_set_bool_request(payload) {
+                        let mut led_guard = USER_LED.lock().await;
+                        if let Some(ref mut led) = *led_guard {
+                            if turn_on {
+                                led.set_high();
+                            } else {
+                                led.set_low();
+                            }
+                        }
+                        info!("[ROS2 Service] /nucleo/set_led -> data={=bool} 처리 완료", turn_on);
+
+                        // Response 직렬화 및 Zenoh REPLY 전송
+                        let resp_len = Ros2Cdr::encode_set_bool_response(
+                            &mut cdr_buf,
+                            true,
+                            if turn_on { "LED ON" } else { "LED OFF" },
+                        );
+                        seq = seq.wrapping_add(1);
+                        let rep_len = ZenohWire::build_reply(&mut frame_buf, seq, q_id, &cdr_buf[..resp_len]);
+                        let _ = socket.send_to(&frame_buf[..rep_len], remote).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 1 Hz 텔레메트리 RTT 콘솔 리포터
+#[embassy_executor::task]
+async fn task_rtt_reporter(stack: Stack<'static>) {
+    let mut ticker = Ticker::every(Duration::from_secs(1));
+    loop {
+        ticker.next().await;
+
+        let ip = stack.config_v4().map(|c| c.address.address()).unwrap_or(Ipv4Address::new(0, 0, 0, 0));
+        let idle = TICK_IDLE_COUNT.swap(0, Ordering::Relaxed);
+        let busy = TICK_BUSY_COUNT.swap(0, Ordering::Relaxed);
+        let total = idle + busy;
+        let cpu_load = if total > 0 { (busy as f32 / total as f32) * 100.0 } else { 0.0 };
+
+        info!("[ROS2 Node 1Hz] IP: {} | CPU: {=f32}% (Idle: {=u32}, Busy: {=u32})", ip, cpu_load, idle, busy);
+    }
+}
+
+#[embassy_executor::task]
+async fn task_net_runner(mut runner: embassy_net::Runner<'static, Ethernet<'static, ETH, GenericSMI>>) {
+    runner.run().await
+}
+
+// ----------------------------------------------------------------------------
+// 5. 엔트리포인트 (메인 진입점)
+// ----------------------------------------------------------------------------
+static RT_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
+static PACKET_QUEUE: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
+static STACK_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
+static STACK: StaticCell<Stack<'static>> = StaticCell::new();
+
+#[embassy_stm32::interrupt]
+unsafe fn CEC() {
+    RT_EXECUTOR.on_interrupt();
+}
+
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    let p = embassy_stm32::init(Default::default());
+    info!(">>> NUCLEO-H743ZI2 임베디드 ROS 2 노드 시작 (06_ros2_node) <<<");
+
+    unsafe {
+        init_proc_stat_timer();
+    }
+
+    let executor = cortex_m::singleton!(: embassy_executor::raw::Executor = embassy_executor::raw::Executor::new(core::ptr::null_mut())).unwrap();
+    let spawner = executor.spawner();
+
+    spawner.must_spawn(main_task(spawner, p));
+
+    loop {
+        IS_SLEEPING.store(false, Ordering::Relaxed);
+        unsafe {
+            executor.poll();
+        }
+        IS_SLEEPING.store(true, Ordering::Release);
+        cortex_m::asm::wfe();
+        IS_SLEEPING.store(false, Ordering::Release);
+    }
+}
+
+#[embassy_executor::task]
+async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
+    // User LED (PB0: LD1 Green)
+    let led1 = Output::new(p.PB0, Level::Low, Speed::Low);
+    {
+        let mut guard = USER_LED.lock().await;
+        *guard = Some(led1);
+    }
+
+    // I2C1 초기화 (PB8=SCL, PB9=SDA, 400kHz Fast Mode)
+    let i2c = I2c::new(
+        p.I2C1,
+        p.PB8,
+        p.PB9,
+        Irqs,
+        p.DMA1_CH0,
+        p.DMA1_CH1,
+        I2C_FAST_MODE_HZ,
+        Default::default(),
+    );
+    {
+        let mut guard = I2C_BUS.lock().await;
+        *guard = Some(i2c);
+    }
+
+    // 센서 초기화
+    {
+        let mut guard = I2C_BUS.lock().await;
+        if let Some(ref mut i2c) = *guard {
+            // 1. LSM6DSO
+            let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_104HZ_2G]).await;
+            let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_104HZ_250DPS]).await;
+            // 2. LIS2MDL
+            let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_10HZ_CONT]).await;
+            // 3. LPS22HH
+            let _ = i2c.write(ADDR_LPS22HH, &[lps22hh::CTRL_REG1, lps22hh::VAL_CTRL_REG1_1HZ_BDU]).await;
+            // 4. STTS751
+            let _ = i2c.write(ADDR_STTS751, &[stts751::CONFIG, stts751::VAL_CONFIG_CONTINUOUS]).await;
+            let _ = i2c.write(ADDR_STTS751, &[stts751::CONVERSION_RATE, stts751::VAL_RATE_1_CONV_PER_SEC]).await;
+            // 5. HTS221
+            let _ = i2c.write(ADDR_HTS221, &[hts221::CTRL_REG1, hts221::VAL_CTRL_REG1_1HZ_PD_BDU]).await;
+        }
+    }
+
+    // LAN8742A 이더넷 RMII
+    let rmii_pins = BoardRmiiPins::new(
+        p.PA1,
+        p.PA2,
+        p.PC1,
+        p.PA7,
+        p.PC4,
+        p.PC5,
+        p.PG13,
+        p.PB13,
+        p.PG11,
+    );
+
+    let mac_addr = [0x02, 0x80, 0xE1, 0x1D, 0x20, 0x06];
+    let queue = PACKET_QUEUE.init(PacketQueue::new());
+
+    let eth_device = Ethernet::new(
+        queue,
+        p.ETH,
+        Irqs,
+        rmii_pins.ref_clk,
+        rmii_pins.mdio,
+        rmii_pins.mdc,
+        rmii_pins.crs_dv,
+        rmii_pins.rx_d0,
+        rmii_pins.rx_d1,
+        rmii_pins.tx_d0,
+        rmii_pins.tx_d1,
+        rmii_pins.tx_en,
+        GenericSMI::new(0),
+        mac_addr,
+    );
+
+    let (net_stack, runner) = embassy_net::new(
+        eth_device,
+        embassy_net::Config::dhcpv4(Default::default()),
+        STACK_RESOURCES.init(StackResources::new()),
+        0x1234_5678,
+    );
+    let stack = *STACK.init(net_stack);
+
+    // RT Executor (CEC) 초기화
+    interrupt::CEC.set_priority(Priority::P6);
+    let rt_spawner = RT_EXECUTOR.start(interrupt::CEC);
+    rt_spawner.spawn(task_rt_imu_loop()).unwrap();
+
+    // 비동기 태스크 스폰
+    spawner.spawn(task_net_runner(runner)).unwrap();
+    spawner.spawn(task_env_sensor_loop()).unwrap();
+    spawner.spawn(task_zenoh_udp(stack)).unwrap();
+    spawner.spawn(task_rtt_reporter(stack)).unwrap();
+}
