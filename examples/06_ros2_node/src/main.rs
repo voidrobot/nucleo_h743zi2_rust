@@ -310,7 +310,13 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
     let mut cdr_buf = [0u8; 1024];
     let mut att_buf = [0u8; 33];
 
-    let mut seq: u32 = 0;
+    let mut frame_seq: u32 = 0;
+    let mut seq_imu: i64 = 0;
+    let mut seq_mag: i64 = 0;
+    let mut seq_press: i64 = 0;
+    let mut seq_temp: i64 = 0;
+    let mut seq_hum: i64 = 0;
+
     let mut ticker_100hz = Ticker::every(Duration::from_hz(100));
     let mut div_10hz: u8 = 0;
     let mut div_1hz: u16 = 0;
@@ -318,9 +324,21 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
     let cov_mag = [1e-6, 0.0, 0.0, 0.0, 1e-6, 0.0, 0.0, 0.0, 1e-6];
 
     let zid_bytes: [u8; 16] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09,
+        0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
     ];
+
+    // 토픽(Publisher)별 독립 GID 정의 (마지막 바이트로 고유 식별)
+    let mut gid_imu = zid_bytes;
+    gid_imu[15] = 0x01;
+    let mut gid_mag = zid_bytes;
+    gid_mag[15] = 0x02;
+    let mut gid_press = zid_bytes;
+    gid_press[15] = 0x03;
+    let mut gid_temp = zid_bytes;
+    gid_temp[15] = 0x04;
+    let mut gid_hum = zid_bytes;
+    gid_hum[15] = 0x05;
 
     let mut session_established = false;
     let mut last_rx_instant = Instant::now();
@@ -358,10 +376,11 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                 };
                 let cdr_len = imu_msg.encode_cdr(&mut cdr_buf);
 
-                seq = seq.wrapping_add(1);
+                frame_seq = frame_seq.wrapping_add(1);
+                seq_imu = seq_imu.wrapping_add(1);
                 let time_ns = (snap.sec as i64) * 1_000_000_000 + (snap.nanosec as i64);
-                ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
-                let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, msg_endpoints::KEY_IMU_DATA, Some(&att_buf), &cdr_buf[..cdr_len]);
+                ZenohWire::build_rmw_attachment(&mut att_buf, seq_imu, time_ns, &gid_imu);
+                let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_IMU_DATA, Some(&att_buf), &cdr_buf[..cdr_len]);
                 let _ = socket.send_to(&frame_buf[..frame_len], remote_host).await;
 
                 // 2. 10 Hz 지자기 데이터 발행
@@ -373,9 +392,10 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                         cov_mag,
                     );
                     let cdr_len = mag_msg.encode_cdr(&mut cdr_buf);
-                    seq = seq.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
-                    let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, msg_endpoints::KEY_IMU_MAG, Some(&att_buf), &cdr_buf[..cdr_len]);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    seq_mag = seq_mag.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_mag, time_ns, &gid_mag);
+                    let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_IMU_MAG, Some(&att_buf), &cdr_buf[..cdr_len]);
                     let _ = socket.send_to(&frame_buf[..frame_len], remote_host).await;
                 }
 
@@ -387,43 +407,46 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                     // Pressure
                     let press_msg = FluidPressure::new(hdr, env.pressure_pa, 0.0);
                     let p_len = press_msg.encode_cdr(&mut cdr_buf);
-                    seq = seq.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
-                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, msg_endpoints::KEY_PRESSURE, Some(&att_buf), &cdr_buf[..p_len]);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    seq_press = seq_press.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_press, time_ns, &gid_press);
+                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_PRESSURE, Some(&att_buf), &cdr_buf[..p_len]);
                     let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
 
                     // Temperature
                     let temp_msg = Temperature::new(hdr, env.temperature_c, 0.0);
                     let t_len = temp_msg.encode_cdr(&mut cdr_buf);
-                    seq = seq.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
-                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, msg_endpoints::KEY_TEMPERATURE, Some(&att_buf), &cdr_buf[..t_len]);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    seq_temp = seq_temp.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_temp, time_ns, &gid_temp);
+                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_TEMPERATURE, Some(&att_buf), &cdr_buf[..t_len]);
                     let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
 
                     // Humidity
                     let hum_msg = RelativeHumidity::new(hdr, env.humidity_ratio, 0.0);
                     let h_len = hum_msg.encode_cdr(&mut cdr_buf);
-                    seq = seq.wrapping_add(1);
-                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
-                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, msg_endpoints::KEY_HUMIDITY, Some(&att_buf), &cdr_buf[..h_len]);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    seq_hum = seq_hum.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq_hum, time_ns, &gid_hum);
+                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, frame_seq, msg_endpoints::KEY_HUMIDITY, Some(&att_buf), &cdr_buf[..h_len]);
                     let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
 
-                    // 4. ROS 2 Jazzy Liveliness Token 정기 발행 (1 Hz: 토픽 6종 + 서비스 1종)
+                    // 4. ROS 2 Jazzy Liveliness Token 정기 발행 (1 Hz: 토픽 7종 + 서비스 1종)
                     for (i, &lv) in msg_endpoints::TOPIC_LIVELINESS_TOKENS.iter().enumerate() {
-                        seq = seq.wrapping_add(1);
-                        let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, seq, (i + 10) as u32, lv);
+                        frame_seq = frame_seq.wrapping_add(1);
+                        let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, (i + 10) as u32, lv);
                         let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
 
-                        seq = seq.wrapping_add(1);
-                        let lv_len = ZenohWire::build_push_put(&mut frame_buf, seq, lv, &[]);
+                        frame_seq = frame_seq.wrapping_add(1);
+                        let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, lv, &[]);
                         let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
                     }
-                    seq = seq.wrapping_add(1);
-                    let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, seq, 21, srv_endpoints::TOKEN_SET_LED);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, 21, srv_endpoints::TOKEN_SET_LED);
                     let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
 
-                    seq = seq.wrapping_add(1);
-                    let lv_len = ZenohWire::build_push_put(&mut frame_buf, seq, srv_endpoints::TOKEN_SET_LED, &[]);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, srv_endpoints::TOKEN_SET_LED, &[]);
                     let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
 
                     // 5. 라우터 생존성 감시 및 자동 재연결(Auto-Reconnect) 트리거
@@ -455,29 +478,34 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                 if ZenohWire::is_open_ack(&rx_packet[..len]) {
                     info!("[Zenoh] OpenAck 수신! Zenoh 세션 수립(Established) 성공! 텔레메트리 스트리밍 시작.");
                     session_established = true;
-                    seq = 0;
+                    frame_seq = 0;
+                    seq_imu = 0;
+                    seq_mag = 0;
+                    seq_press = 0;
+                    seq_temp = 0;
+                    seq_hum = 0;
 
                     // 1. /nucleo/set_led Queryable 등록 (DECLARE_QUERYABLE)
-                    seq = seq.wrapping_add(1);
-                    let qable_len = ZenohWire::build_declare_queryable(&mut frame_buf, seq, 1, srv_endpoints::KEY_SET_LED);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let qable_len = ZenohWire::build_declare_queryable(&mut frame_buf, frame_seq, 1, srv_endpoints::KEY_SET_LED);
                     let _ = socket.send_to(&frame_buf[..qable_len], remote_host).await;
 
-                    // 2. 세션 수립 즉시 ROS 2 Jazzy Liveliness Token 발행
+                    // 2. 세션 수립 즉시 ROS 2 Jazzy Liveliness Token 발행 (토픽 7종: NN + MP 5종 + MS 1종)
                     for (i, &lv) in msg_endpoints::TOPIC_LIVELINESS_TOKENS.iter().enumerate() {
-                        seq = seq.wrapping_add(1);
-                        let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, seq, (i + 10) as u32, lv);
+                        frame_seq = frame_seq.wrapping_add(1);
+                        let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, (i + 10) as u32, lv);
                         let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
 
-                        seq = seq.wrapping_add(1);
-                        let lv_len = ZenohWire::build_push_put(&mut frame_buf, seq, lv, &[]);
+                        frame_seq = frame_seq.wrapping_add(1);
+                        let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, lv, &[]);
                         let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
                     }
-                    seq = seq.wrapping_add(1);
-                    let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, seq, 21, srv_endpoints::TOKEN_SET_LED);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, frame_seq, 21, srv_endpoints::TOKEN_SET_LED);
                     let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
 
-                    seq = seq.wrapping_add(1);
-                    let lv_len = ZenohWire::build_push_put(&mut frame_buf, seq, srv_endpoints::TOKEN_SET_LED, &[]);
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let lv_len = ZenohWire::build_push_put(&mut frame_buf, frame_seq, srv_endpoints::TOKEN_SET_LED, &[]);
                     let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
                     continue;
                 }
@@ -488,7 +516,7 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                 }
 
                 if let Some((msg_type, key_expr, q_id, payload)) = ZenohWire::parse_frame(&rx_packet[..len]) {
-                    if key_expr.contains("cmd_vel") && (msg_type == msg_id::PUSH || msg_type == msg_id::PUT) {
+                    if (key_expr.contains("cmd_vel") || (key_expr.is_empty() && payload.len() >= 48)) && (msg_type == msg_id::PUSH || msg_type == msg_id::PUT) {
                         let actual_payload = if let Some(pos) = payload.windows(4).position(|w| w == [0x00, 0x01, 0x00, 0x00]) {
                             &payload[pos..]
                         } else {
@@ -517,9 +545,9 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
                             // Response 직렬화 및 Zenoh REPLY 전송
                             let resp = set_bool::Response::new(true, if req.data { "LED ON" } else { "LED OFF" });
                             let resp_len = resp.encode_cdr(&mut cdr_buf);
-                            seq = seq.wrapping_add(1);
+                            frame_seq = frame_seq.wrapping_add(1);
                             ZenohWire::build_rmw_attachment(&mut att_buf, 1, 0, &zid_bytes);
-                            let rep_len = ZenohWire::build_reply(&mut frame_buf, seq, q_id, srv_endpoints::KEY_SET_LED, Some(&att_buf), &cdr_buf[..resp_len]);
+                            let rep_len = ZenohWire::build_reply(&mut frame_buf, frame_seq, q_id, srv_endpoints::KEY_SET_LED, Some(&att_buf), &cdr_buf[..resp_len]);
                             let _ = socket.send_to(&frame_buf[..rep_len], remote).await;
                         }
                     }

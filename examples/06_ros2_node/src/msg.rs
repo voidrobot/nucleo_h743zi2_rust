@@ -228,14 +228,19 @@ pub mod endpoints {
     pub const KEY_HUMIDITY: &str =
         "0/nucleo/humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_8687c99b4fb393cb2e545e407b5ea7fd0b5d8960bcd849a0f86c544740138839";
 
-    pub const KEY_CMD_VEL: &str = "0/nucleo/cmd_vel";
+    pub const KEY_CMD_VEL: &str =
+        "0/nucleo/cmd_vel/geometry_msgs::msg::dds_::Twist_/RIHS01_9c45bf16fe0983d80e3cfe750d6835843d265a9a6c46bd2e609fcddde6fb8d2a";
 
-    pub const TOPIC_LIVELINESS_TOKENS: [&str; 6] = [
+    pub const TOKEN_CMD_VEL: &str =
+        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/16/MS/%/%/nucleo_h743zi2/%nucleo%cmd_vel/geometry_msgs::msg::dds_::Twist_/RIHS01_9c45bf16fe0983d80e3cfe750d6835843d265a9a6c46bd2e609fcddde6fb8d2a/::,:,:,:,,";
+
+    pub const TOPIC_LIVELINESS_TOKENS: [&str; 7] = [
         "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/0/NN/%/%/nucleo_h743zi2",
         "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/11/MP/%/%/nucleo_h743zi2/%nucleo%imu%data/sensor_msgs::msg::dds_::Imu_/RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b/::,:,:,:,,",
         "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/12/MP/%/%/nucleo_h743zi2/%nucleo%imu%mag/sensor_msgs::msg::dds_::MagneticField_/RIHS01_e80f32f56a20486c9923008fc1a1db07bbb273cbbf6a5b3bfa00835ee00e4dff/::,:,:,:,,",
         "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/13/MP/%/%/nucleo_h743zi2/%nucleo%pressure/sensor_msgs::msg::dds_::FluidPressure_/RIHS01_22dfb2b145a0bd5a31a1ac3882a1b32148b51d9b2f3bab250290d66f3595bc32/::,:,:,:,,",
         "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/14/MP/%/%/nucleo_h743zi2/%nucleo%temperature/sensor_msgs::msg::dds_::Temperature_/RIHS01_72514a14126ab9f8a9abec974c78e5610a367b59db5da355ff1fb982d5bad4b8/::,:,:,:,,",
         "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/15/MP/%/%/nucleo_h743zi2/%nucleo%humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_8687c99b4fb393cb2e545e407b5ea7fd0b5d8960bcd849a0f86c544740138839/::,:,:,:,,",
+        TOKEN_CMD_VEL,
     ];
 }

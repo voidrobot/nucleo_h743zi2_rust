@@ -100,14 +100,18 @@ class AhrsVerifierNode(Node):
     def check_progress(self):
         elapsed = time.time() - self.start_time
 
-        # 1. 1초 경과 시 cmd_vel 발행
+        # 1. 1초 경과 시 cmd_vel 매칭 구독자 확인 및 발행
         if elapsed > 1.0 and not self.cmd_vel_sent:
-            t = Twist()
-            t.linear.x = 0.5
-            t.angular.z = 0.2
-            self.pub_vel.publish(t)
-            self.cmd_vel_sent = True
-            self.get_logger().info('[CmdVel] /nucleo/cmd_vel (linear.x=0.5, angular.z=0.2) 발행 완료')
+            sub_count = self.pub_vel.get_subscription_count()
+            if sub_count >= 1:
+                t = Twist()
+                t.linear.x = 0.5
+                t.angular.z = 0.2
+                self.pub_vel.publish(t)
+                self.cmd_vel_sent = True
+                self.get_logger().info(f'[CmdVel] /nucleo/cmd_vel 매칭 구독자 확인({sub_count}개) 및 속도 명령 발행 완료')
+            else:
+                self.get_logger().warn(f'[CmdVel] /nucleo/cmd_vel 매칭 구독자 탐색 대기 중... (현재: {sub_count}개)')
 
         # 2. 1.5초 경과 시 set_led 서비스 호출
         if elapsed > 1.5 and not self.service_called:
