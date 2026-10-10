@@ -1,11 +1,13 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 //! # NUCLEO-H743ZI2 & X-NUCLEO-IKS01A3 Board Support Package (BSP)
 //!
 //! NUCLEO-H743ZI2 보드 및 IKS01A3 확장 센서 쉴드를 위한 공통 하드웨어 추상화 계층이다.
 
 pub use defmt;
+#[cfg(not(test))]
 use defmt_rtt as _;
+#[cfg(not(test))]
 use panic_probe as _;
 
 use embassy_stm32::gpio::{Level, Output, Speed};

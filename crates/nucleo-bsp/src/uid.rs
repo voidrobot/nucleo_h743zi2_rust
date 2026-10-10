@@ -51,8 +51,6 @@ pub fn get_uid_prng_seed() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_mac_locally_administered_unicast() {
         // 호스트 환경에서는 가상 UID로 테스트

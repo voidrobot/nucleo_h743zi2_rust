@@ -15,8 +15,6 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_io_async::Write as _;
 use heapless::String;
-use nucleo_bsp::iks01a3::registers::*;
-use nucleo_bsp::iks01a3::sensitivity::*;
 use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::uid;
 use nucleo_bsp::BoardLeds;

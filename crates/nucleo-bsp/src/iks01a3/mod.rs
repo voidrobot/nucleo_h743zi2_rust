@@ -16,5 +16,6 @@ pub mod hts221_calib;
 
 pub use registers::addresses::*;
 pub use registers::who_am_i::*;
+pub use registers::{hts221, lis2dw12, lis2mdl, lps22hh, lsm6dso, stts751};
 pub use sensitivity::constants::*;
 pub use hts221_calib::Hts221Calibration;

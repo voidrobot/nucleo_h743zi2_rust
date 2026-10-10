@@ -10,9 +10,7 @@ use embassy_stm32::bind_interrupts;
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::time::Hertz;
 use embassy_time::{Duration, Ticker};
-use nucleo_bsp::iks01a3::registers::*;
-use nucleo_bsp::iks01a3::sensitivity::*;
-use nucleo_bsp::iks01a3::ADDR_LSM6DSO;
+use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::BoardLeds;
 
 use mixed_cpp_legacy_05::cpp_bridge::SafeBiquadFilter;

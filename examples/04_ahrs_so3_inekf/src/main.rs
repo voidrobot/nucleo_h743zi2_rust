@@ -12,7 +12,7 @@
 #![no_main]
 
 use core::fmt::Write as _;
-use defmt::{info, warn};
+use defmt::{error, info, warn};
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::eth::generic_smi::GenericSMI;
@@ -25,9 +25,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_io_async::Write as _;
 use heapless::String;
-use nucleo_bsp::iks01a3::registers::*;
-use nucleo_bsp::iks01a3::sensitivity::*;
-use nucleo_bsp::iks01a3::{ADDR_LIS2MDL, ADDR_LSM6DSO};
+use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::uid;
 use nucleo_bsp::BoardLeds;
 use so3_inekf::RightInvariantInEKF;
@@ -278,7 +276,6 @@ async fn task_imu_high_priority_rt() {
     let mut ticker = Ticker::every(Duration::from_hz(100));
     let mut last_tick = Instant::now();
     let mut count: u32 = 0;
-    const PI: f32 = core::f32::consts::PI;
 
     loop {
         ticker.next().await;

@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use defmt::{error, info, warn};
+use defmt::{error, info};
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::i2c::{self, I2c};
@@ -10,8 +10,6 @@ use embassy_stm32::time::Hertz;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
-use nucleo_bsp::iks01a3::registers::*;
-use nucleo_bsp::iks01a3::sensitivity::*;
 use nucleo_bsp::iks01a3::*;
 use nucleo_bsp::BoardLeds;
 

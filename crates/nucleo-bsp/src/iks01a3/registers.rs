@@ -59,6 +59,9 @@ pub mod lsm6dso {
     // 2차 디지털 저역통과필터 (LPF2) 컷오프 주파수 설정
     /// LPF2 Cutoff = ODR / 10 = 41.6 Hz (100Hz 샘플링 기준 50Hz 나이퀴스트 주파수 방어)
     pub const VAL_CTRL8_XL_LPF2_ODR_DIV_10: u8 = 0x20;
+
+    // 감도 계수 및 단위 변환 함수 통합 re-export
+    pub use super::super::sensitivity::lsm6dso::*;
 }
 
 /// LIS2MDL 3축 지자기 센서 레지스터 및 설정값
@@ -71,6 +74,8 @@ pub mod lis2mdl {
     pub const VAL_CFG_REG_A_RESET: u8 = 0x80;
     pub const VAL_CFG_REG_A_10HZ_CONT: u8 = 0x00;
     pub const VAL_CFG_REG_C_BDU: u8 = 0x10;
+
+    pub use super::super::sensitivity::lis2mdl::*;
 }
 
 /// LIS2DW12 3축 보조 가속도계 레지스터 및 설정값
@@ -80,6 +85,8 @@ pub mod lis2dw12 {
 
     /// 200Hz ODR (High-Performance 14-bit), ±2g
     pub const VAL_CTRL1_200HZ_14BIT_2G: u8 = 0x64;
+
+    pub use super::super::sensitivity::lis2dw12::*;
 }
 
 /// LPS22HH 기압계 레지스터 및 설정값
@@ -90,6 +97,8 @@ pub mod lps22hh {
 
     /// 1Hz ODR, Block Data Update(BDU)=1
     pub const VAL_CTRL_REG1_1HZ_BDU: u8 = 0x12;
+
+    pub use super::super::sensitivity::lps22hh::*;
 }
 
 /// STTS751 정밀 온도계 레지스터 및 설정값
@@ -101,6 +110,8 @@ pub mod stts751 {
 
     pub const VAL_CONFIG_CONTINUOUS: u8 = 0x00;
     pub const VAL_RATE_1_CONV_PER_SEC: u8 = 0x04;
+
+    pub use super::super::sensitivity::stts751::*;
 }
 
 /// HTS221 온습도계 레지스터 및 설정값
