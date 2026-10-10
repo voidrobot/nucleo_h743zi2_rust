@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::fmt::Write as _;
-use defmt::{info, warn};
+use defmt::{error, info, warn};
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::eth::generic_smi::GenericSMI;
@@ -15,7 +15,12 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_io_async::Write as _;
 use heapless::String;
+use nucleo_bsp::iks01a3::registers::*;
+use nucleo_bsp::iks01a3::sensitivity::*;
+use nucleo_bsp::iks01a3::*;
+use nucleo_bsp::uid;
 use nucleo_bsp::BoardLeds;
+use static_cell::StaticCell;
 
 // 1. 하드웨어 인터럽트 바인딩 (I2C1 + ETH)
 bind_interrupts!(struct Irqs {
@@ -39,6 +44,19 @@ unsafe fn CEC() {
 // 3. I2C 버스 뮤텍스
 type I2cBus = Mutex<CriticalSectionRawMutex, Option<I2c<'static, embassy_stm32::mode::Async>>>;
 static I2C_BUS: I2cBus = Mutex::new(None);
+
+/// HTS221 공장 캘리브레이션 파라미터 저장소
+static HTS221_CALIB: Mutex<CriticalSectionRawMutex, Hts221Calibration> =
+    Mutex::new(Hts221Calibration {
+        h0_rh_x2: 0,
+        h1_rh_x2: 0,
+        h0_t0_out: 0,
+        h1_t0_out: 0,
+        t0_degc_x8: 0,
+        t1_degc_x8: 0,
+        t0_out: 0,
+        t1_out: 0,
+    });
 
 // 4. 통합 센서 계측 데이터 스냅샷 구조체
 #[derive(Copy, Clone, Default)]
@@ -87,17 +105,9 @@ static SENSOR_STATE: Mutex<CriticalSectionRawMutex, SensorSnapshot> = Mutex::new
     http_request_count: 0,
 });
 
-// I2C 7비트 슬레이브 주소
-const ADDR_LSM6DSO: u8 = 0x6B;
-const ADDR_LIS2MDL: u8 = 0x1E;
-const ADDR_LIS2DW12: u8 = 0x19;
-const ADDR_LPS22HH: u8 = 0x5D;
-const ADDR_STTS751: u8 = 0x4A;
-const ADDR_HTS221: u8 = 0x5F;
-
-// 5. 이더넷 패킷 큐 및 네트워크 스택 리소스 (정적 할당)
-static mut PACKET_QUEUE: PacketQueue<4, 4> = PacketQueue::new();
-static mut STACK_RESOURCES: embassy_net::StackResources<4> = embassy_net::StackResources::new();
+// 5. 이더넷 패킷 큐 및 네트워크 스택 리소스 (StaticCell 기반 무손실 안전 정적 할당)
+static PACKET_QUEUE: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
+static STACK_RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
 
 type Device = Ethernet<'static, ETH, GenericSMI>;
 
@@ -117,7 +127,7 @@ async fn main(spawner: Spawner) {
     info!("NUCLEO-H743ZI2 DHCP Ethernet & Sensor Web Dashboard (03)");
     info!("============================================================");
 
-    // [1] I2C1 400kHz Fast Mode 초기화 (PB8/PB9)
+    // [1] I2C1 400kHz Fast Mode DMA 비동기 초기화 (PB8/PB9)
     let i2c = I2c::new(
         p.I2C1,
         p.PB8,
@@ -132,16 +142,14 @@ async fn main(spawner: Spawner) {
         let mut bus = I2C_BUS.lock().await;
         *bus = Some(i2c);
     }
-    info!("I2C1 400kHz 버스 초기화 완료 (PB8/PB9)");
+    info!("I2C1 400kHz DMA 비동기 버스 초기화 완료 (PB8/PB9)");
 
     // [2] X-NUCLEO-IKS01A3 6종 센서 시그니처 검증 및 고속 오버샘플링 초기화
     init_sensors().await;
 
-    // [3] 이더넷 RMII LAN8742A 드라이버 초기화
-    // NUCLEO-144 RMII 핀 매핑:
-    // PA1: REF_CLK, PA2: MDIO, PC1: MDC, PA7: CRS_DV, PC4: RXD0, PC5: RXD1, PG13: TXD0, PB13: TXD1, PG11: TX_EN
-    let mac_addr = [0x00, 0x80, 0xE1, 0xDE, 0xAD, 0x03];
-    let queue = unsafe { &mut *core::ptr::addr_of_mut!(PACKET_QUEUE) };
+    // [3] 이더넷 RMII LAN8742A 드라이버 초기화 (STM32 고유 UID 기반 EUI-48 MAC 주소 생성)
+    let mac_addr = uid::get_unique_mac_address();
+    let queue = PACKET_QUEUE.init(PacketQueue::new());
     let eth_device = Ethernet::new(
         queue,
         p.ETH,
@@ -158,14 +166,14 @@ async fn main(spawner: Spawner) {
         GenericSMI::new(0),
         mac_addr,
     );
-    info!("LAN8742A RMII 이더넷 드라이버 초기화 완료 (MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+    info!("LAN8742A RMII 이더넷 드라이버 초기화 완료 (STM32 UID MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
         mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]
     );
 
-    // [4] embassy-net TCP/IP 스택 및 DHCPv4 클라이언트 구성
+    // [4] embassy-net TCP/IP 스택 및 DHCPv4 클라이언트 구성 (UID 파생 난수 시드)
     let net_config = embassy_net::Config::dhcpv4(Default::default());
-    let seed = 0x9876_5432_10FE_DCBA; // 난수 시드
-    let resources = unsafe { &mut *core::ptr::addr_of_mut!(STACK_RESOURCES) };
+    let seed = uid::get_uid_prng_seed();
+    let resources = STACK_RESOURCES.init(embassy_net::StackResources::new());
     let (stack, runner) = embassy_net::new(eth_device, net_config, resources, seed);
 
     spawner.must_spawn(net_task(runner));
@@ -185,49 +193,76 @@ async fn main(spawner: Spawner) {
     leds.green.set_low();
 }
 
-/// 6종 센서의 WHO_AM_I 검증 및 416Hz 오버샘플링 / LPF2 안티-에일리어싱(41.6Hz) 세팅
+/// 6종 센서의 WHO_AM_I 검증 및 레지스터 설정
 async fn init_sensors() {
     let mut bus = I2C_BUS.lock().await;
-    let i2c = bus.as_mut().unwrap();
+    let i2c = bus.as_mut().expect("I2C 버스 미초기화");
 
     // 1. LSM6DSO (6축 IMU): 416Hz ODR + LPF2 (41.6Hz Cutoff)
     let mut who = [0u8; 1];
-    let _ = i2c.blocking_write_read(ADDR_LSM6DSO, &[0x0F], &mut who);
-    info!("  [LSM6DSO 6축 IMU] WHO_AM_I: 0x{:02X} (기대값: 0x6C)", who[0]);
-    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x10, 0x62]); // Accel 416Hz, ±2g, LPF2 ON
-    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x11, 0x60]); // Gyro 416Hz, ±250dps
-    let _ = i2c.blocking_write(ADDR_LSM6DSO, &[0x17, 0x20]); // LPF2 Cutoff = ODR/10 = 41.6Hz
+    if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[REG_WHO_AM_I], &mut who).await {
+        error!("LSM6DSO WHO_AM_I 읽기 실패: {:?}", e);
+    } else {
+        info!("  [LSM6DSO 6축 IMU] WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_LSM6DSO);
+    }
+    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_416HZ_2G_LPF2]).await;
+    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_416HZ_250DPS]).await;
+    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL8_XL, lsm6dso::VAL_CTRL8_XL_LPF2_ODR_DIV_10]).await;
 
-    // 2. LIS2MDL (지자기): 10Hz Continuous
-    let _ = i2c.blocking_write_read(ADDR_LIS2MDL, &[0x4F], &mut who);
-    info!("  [LIS2MDL 지자기] WHO_AM_I: 0x{:02X} (기대값: 0x40)", who[0]);
-    let _ = i2c.blocking_write(ADDR_LIS2MDL, &[0x60, 0x00]);
-    let _ = i2c.blocking_write(ADDR_LIS2MDL, &[0x62, 0x10]);
+    // 2. LIS2MDL (3축 지자기)
+    if let Err(e) = i2c.write_read(ADDR_LIS2MDL, &[REG_LIS2MDL_WHO_AM_I], &mut who).await {
+        error!("LIS2MDL WHO_AM_I 읽기 실패: {:?}", e);
+    } else {
+        info!("  [LIS2MDL 지자기] WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_LIS2MDL);
+    }
+    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_10HZ_CONT]).await;
+    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_C, lis2mdl::VAL_CFG_REG_C_BDU]).await;
 
-    // 3. LIS2DW12 (보조 가속도계): 200Hz ODR
-    let _ = i2c.blocking_write_read(ADDR_LIS2DW12, &[0x0F], &mut who);
-    info!("  [LIS2DW12 보조 가속도] WHO_AM_I: 0x{:02X} (기대값: 0x44)", who[0]);
-    let _ = i2c.blocking_write(ADDR_LIS2DW12, &[0x20, 0x64]);
+    // 3. LIS2DW12 (보조 가속도계)
+    if let Err(e) = i2c.write_read(ADDR_LIS2DW12, &[REG_WHO_AM_I], &mut who).await {
+        error!("LIS2DW12 WHO_AM_I 읽기 실패: {:?}", e);
+    } else {
+        info!("  [LIS2DW12 보조 가속도] WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_LIS2DW12);
+    }
+    let _ = i2c.write(ADDR_LIS2DW12, &[lis2dw12::CTRL1, lis2dw12::VAL_CTRL1_200HZ_14BIT_2G]).await;
 
-    // 4. LPS22HH (기압/온도): 1Hz ODR
-    let _ = i2c.blocking_write_read(ADDR_LPS22HH, &[0x0F], &mut who);
-    info!("  [LPS22HH 기압계] WHO_AM_I: 0x{:02X} (기대값: 0xB3)", who[0]);
-    let _ = i2c.blocking_write(ADDR_LPS22HH, &[0x10, 0x12]);
+    // 4. LPS22HH (기압/온도)
+    if let Err(e) = i2c.write_read(ADDR_LPS22HH, &[REG_WHO_AM_I], &mut who).await {
+        error!("LPS22HH WHO_AM_I 읽기 실패: {:?}", e);
+    } else {
+        info!("  [LPS22HH 기압계] WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_LPS22HH);
+    }
+    let _ = i2c.write(ADDR_LPS22HH, &[lps22hh::CTRL_REG1, lps22hh::VAL_CTRL_REG1_1HZ_BDU]).await;
 
-    // 5. STTS751 (정밀 온도계): 1Hz
-    let _ = i2c.blocking_write_read(ADDR_STTS751, &[0xFD], &mut who);
-    info!("  [STTS751 정밀온도] Product ID: 0x{:02X} (기대값: 0x01)", who[0]);
-    let _ = i2c.blocking_write(ADDR_STTS751, &[0x03, 0x00]);
-    let _ = i2c.blocking_write(ADDR_STTS751, &[0x04, 0x04]);
+    // 5. STTS751 (정밀 온도계)
+    if let Err(e) = i2c.write_read(ADDR_STTS751, &[REG_STTS751_PRODUCT_ID], &mut who).await {
+        error!("STTS751 Product ID 읽기 실패: {:?}", e);
+    } else {
+        info!("  [STTS751 정밀온도] Product ID: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_STTS751);
+    }
+    let _ = i2c.write(ADDR_STTS751, &[stts751::CONFIG, stts751::VAL_CONFIG_CONTINUOUS]).await;
+    let _ = i2c.write(ADDR_STTS751, &[stts751::CONVERSION_RATE, stts751::VAL_RATE_1_CONV_PER_SEC]).await;
 
-    // 6. HTS221 (온습도계): 1Hz
-    let _ = i2c.blocking_write_read(ADDR_HTS221, &[0x0F], &mut who);
-    info!("  [HTS221 온습도계] WHO_AM_I: 0x{:02X} (기대값: 0xBC)", who[0]);
-    let _ = i2c.blocking_write(ADDR_HTS221, &[0x10, 0x1B]);
-    let _ = i2c.blocking_write(ADDR_HTS221, &[0x20, 0x85]);
+    // 6. HTS221 (온습도계)
+    if let Err(e) = i2c.write_read(ADDR_HTS221, &[REG_WHO_AM_I], &mut who).await {
+        error!("HTS221 WHO_AM_I 읽기 실패: {:?}", e);
+    } else {
+        info!("  [HTS221 온습도계] WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_HTS221);
+    }
+    let _ = i2c.write(ADDR_HTS221, &[hts221::AV_CONF, hts221::VAL_AV_CONF_DEFAULT]).await;
+    let _ = i2c.write(ADDR_HTS221, &[hts221::CTRL_REG1, hts221::VAL_CTRL_REG1_1HZ_PD_BDU]).await;
+
+    // HTS221 공장 캘리브레이션 계수 16바이트 읽기
+    let mut calib_buf = [0u8; 16];
+    if let Ok(_) = i2c.write_read(ADDR_HTS221, &[hts221::CALIB_H0_RH_X2], &mut calib_buf).await {
+        let calib = Hts221Calibration::from_raw_registers(&calib_buf);
+        let mut c_guard = HTS221_CALIB.lock().await;
+        *c_guard = calib;
+        info!("  [HTS221 캘리브레이션] OTP 파라미터 로드 완료");
+    }
 }
 
-/// [Task 1: 100 Hz] 고우선순위 선점형 RT-IMU 태스크 (10ms 주기, InterruptExecutor 구동)
+/// [Task 1: 100 Hz] 고우선순위 선점형 IMU 실시간 모션 태스크 (비동기 I2C 읽기)
 #[embassy_executor::task]
 async fn task_imu_100hz() {
     let mut ticker = Ticker::every(Duration::from_hz(100)); // 100 Hz (10ms)
@@ -257,7 +292,8 @@ async fn task_imu_100hz() {
 
         let mut bus = I2C_BUS.lock().await;
         if let Some(i2c) = bus.as_mut() {
-            if i2c.blocking_write_read(ADDR_LSM6DSO, &[0x22], &mut buf).is_ok() {
+            // 1. LSM6DSO 12바이트 버스트 비동기 읽기
+            if i2c.write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_G], &mut buf).await.is_ok() {
                 let gx = i16::from_le_bytes([buf[0], buf[1]]);
                 let gy = i16::from_le_bytes([buf[2], buf[3]]);
                 let gz = i16::from_le_bytes([buf[4], buf[5]]);
@@ -266,26 +302,27 @@ async fn task_imu_100hz() {
                 let az = i16::from_le_bytes([buf[10], buf[11]]);
 
                 let accel_mg = [
-                    ((ax as i32 * 61) / 1000) as i16,
-                    ((ay as i32 * 61) / 1000) as i16,
-                    ((az as i32 * 61) / 1000) as i16,
+                    lsm6dso::raw_to_mg(ax),
+                    lsm6dso::raw_to_mg(ay),
+                    lsm6dso::raw_to_mg(az),
                 ];
                 let gyro_dps = [
-                    ((gx as i32 * 875) / 100000) as i16,
-                    ((gy as i32 * 875) / 100000) as i16,
-                    ((gz as i32 * 875) / 100000) as i16,
+                    lsm6dso::raw_to_dps(gx),
+                    lsm6dso::raw_to_dps(gy),
+                    lsm6dso::raw_to_dps(gz),
                 ];
 
+                // 2. LIS2DW12 보조 가속도계 6바이트 비동기 읽기
                 let mut buf_dw = [0u8; 6];
                 let mut accel2_mg = [0i16; 3];
-                if i2c.blocking_write_read(ADDR_LIS2DW12, &[0x28], &mut buf_dw).is_ok() {
-                    let a2x = i16::from_le_bytes([buf_dw[0], buf_dw[1]]) >> 2;
-                    let a2y = i16::from_le_bytes([buf_dw[2], buf_dw[3]]) >> 2;
-                    let a2z = i16::from_le_bytes([buf_dw[4], buf_dw[5]]) >> 2;
+                if i2c.write_read(ADDR_LIS2DW12, &[lis2dw12::OUT_X_L], &mut buf_dw).await.is_ok() {
+                    let a2x = i16::from_le_bytes([buf_dw[0], buf_dw[1]]);
+                    let a2y = i16::from_le_bytes([buf_dw[2], buf_dw[3]]);
+                    let a2z = i16::from_le_bytes([buf_dw[4], buf_dw[5]]);
                     accel2_mg = [
-                        ((a2x as i32 * 244) / 1000) as i16,
-                        ((a2y as i32 * 244) / 1000) as i16,
-                        ((a2z as i32 * 244) / 1000) as i16,
+                        lis2dw12::raw_to_mg(a2x),
+                        lis2dw12::raw_to_mg(a2y),
+                        lis2dw12::raw_to_mg(a2z),
                     ];
                 }
 
@@ -302,10 +339,10 @@ async fn task_imu_100hz() {
     }
 }
 
-/// [Task 2: 10 Hz] 중속 지자기 센서 샘플링 (100ms 주기)
+/// [Task 2: 10 Hz] 중속 지자기 센서 비동기 샘플링 (100ms 주기)
 #[embassy_executor::task]
 async fn task_mag_10hz() {
-    let mut ticker = Ticker::every(Duration::from_hz(10)); // 10 Hz (100ms)
+    let mut ticker = Ticker::every(Duration::from_hz(10));
     let mut buf = [0u8; 6];
 
     loop {
@@ -313,15 +350,15 @@ async fn task_mag_10hz() {
 
         let mut bus = I2C_BUS.lock().await;
         if let Some(i2c) = bus.as_mut() {
-            if i2c.blocking_write_read(ADDR_LIS2MDL, &[0x68], &mut buf).is_ok() {
+            if i2c.write_read(ADDR_LIS2MDL, &[lis2mdl::OUTX_L_REG], &mut buf).await.is_ok() {
                 let mx = i16::from_le_bytes([buf[0], buf[1]]);
                 let my = i16::from_le_bytes([buf[2], buf[3]]);
                 let mz = i16::from_le_bytes([buf[4], buf[5]]);
 
                 let mag = [
-                    ((mx as i32 * 15) / 10) as i16,
-                    ((my as i32 * 15) / 10) as i16,
-                    ((mz as i32 * 15) / 10) as i16,
+                    lis2mdl::raw_to_mgauss(mx),
+                    lis2mdl::raw_to_mgauss(my),
+                    lis2mdl::raw_to_mgauss(mz),
                 ];
 
                 let mut state = SENSOR_STATE.lock().await;
@@ -332,10 +369,10 @@ async fn task_mag_10hz() {
     }
 }
 
-/// [Task 3: 1 Hz] 저속 환경 센서 샘플링 (1000ms 주기, 50us Yield Window 적용)
+/// [Task 3: 1 Hz] 저속 환경 센서 비동기 샘플링 (1000ms 주기, OTP 캘리브레이션)
 #[embassy_executor::task]
 async fn task_env_1hz() {
-    let mut ticker = Ticker::every(Duration::from_hz(1)); // 1 Hz (1000ms)
+    let mut ticker = Ticker::every(Duration::from_hz(1));
 
     loop {
         ticker.next().await;
@@ -347,37 +384,35 @@ async fn task_env_1hz() {
             let mut bus = I2C_BUS.lock().await;
             if let Some(i2c) = bus.as_mut() {
                 let mut press_buf = [0u8; 5];
-                if i2c.blocking_write_read(ADDR_LPS22HH, &[0x28], &mut press_buf).is_ok() {
+                if i2c.write_read(ADDR_LPS22HH, &[lps22hh::PRESS_OUT_XL], &mut press_buf).await.is_ok() {
                     let raw_press = (press_buf[0] as u32)
                         | ((press_buf[1] as u32) << 8)
                         | ((press_buf[2] as u32) << 16);
                     let raw_temp = i16::from_le_bytes([press_buf[3], press_buf[4]]);
-                    p_hpa_x10 = (raw_press * 10) / 4096;
-                    p_temp_x10 = (raw_temp * 10) / 100;
+                    p_hpa_x10 = lps22hh::raw_to_hpa_x10(raw_press);
+                    p_temp_x10 = lps22hh::raw_to_temp_x10(raw_temp);
                 }
             }
         }
         Timer::after_micros(50).await;
 
-        // 2. STTS751 고정밀 온도계
+        // 2. STTS751 정밀 온도계
         let mut s_temp_x10 = 0i16;
         {
             let mut bus = I2C_BUS.lock().await;
             if let Some(i2c) = bus.as_mut() {
                 let mut stts_high = [0u8; 1];
                 let mut stts_low = [0u8; 1];
-                if i2c.blocking_write_read(ADDR_STTS751, &[0x00], &mut stts_high).is_ok()
-                    && i2c.blocking_write_read(ADDR_STTS751, &[0x02], &mut stts_low).is_ok()
+                if i2c.write_read(ADDR_STTS751, &[stts751::TEMP_HIGH], &mut stts_high).await.is_ok()
+                    && i2c.write_read(ADDR_STTS751, &[stts751::TEMP_LOW], &mut stts_low).await.is_ok()
                 {
-                    let h = stts_high[0] as i8 as i32;
-                    let l = (stts_low[0] >> 4) as i32;
-                    s_temp_x10 = ((h * 10) + ((l * 625) / 1000)) as i16;
+                    s_temp_x10 = stts751::raw_to_temp_x10(stts_high[0], stts_low[0]);
                 }
             }
         }
         Timer::after_micros(50).await;
 
-        // 3. HTS221 온습도계
+        // 3. HTS221 온습도계: OTP 정규 캘리브레이션 1차 선형 보간 적용
         let mut h_hum_x10 = 0u16;
         let mut h_temp_x10 = 0i16;
         {
@@ -385,13 +420,15 @@ async fn task_env_1hz() {
             if let Some(i2c) = bus.as_mut() {
                 let mut hts_h_buf = [0u8; 2];
                 let mut hts_t_buf = [0u8; 2];
-                if i2c.blocking_write_read(ADDR_HTS221, &[0x28 | 0x80], &mut hts_h_buf).is_ok()
-                    && i2c.blocking_write_read(ADDR_HTS221, &[0x2A | 0x80], &mut hts_t_buf).is_ok()
+                if i2c.write_read(ADDR_HTS221, &[hts221::HUMIDITY_OUT_L], &mut hts_h_buf).await.is_ok()
+                    && i2c.write_read(ADDR_HTS221, &[hts221::TEMP_OUT_L], &mut hts_t_buf).await.is_ok()
                 {
                     let raw_h = i16::from_le_bytes(hts_h_buf);
                     let raw_t = i16::from_le_bytes(hts_t_buf);
-                    h_hum_x10 = ((raw_h.abs() as u32 * 1000) / 32767).min(1000) as u16;
-                    h_temp_x10 = (raw_t / 64) as i16;
+
+                    let calib = *HTS221_CALIB.lock().await;
+                    h_hum_x10 = calib.compensate_humidity_x10(raw_h);
+                    h_temp_x10 = calib.compensate_temp_x10(raw_t);
                 }
             }
         }
@@ -451,7 +488,7 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) -> ! {
                     "\"gx\":{},\"gy\":{},\"gz\":{},\"count\":{},\"dt_us\":{},\"min_dt\":{},\"max_dt\":{}}},",
                     "\"aux\":{{\"ax\":{},\"ay\":{},\"az\":{}}},",
                     "\"mag\":{{\"mx\":{},\"my\":{},\"mz\":{},\"count\":{}}},",
-                    "\"env\":{{\"press_hpa\":{}.{},\"stts_temp_c\":{}.{},\"hts_humidity\":{}.{},\"count\":{}}},",
+                    "\"env\":{{\"press_hpa\":{}.{},\"stts_temp_c\":{}.{},\"hts_humidity\":{}.{},\"hts_temp_c\":{}.{},\"count\":{}}},",
                     "\"server\":{{\"requests\":{}}}}}",
                 ),
                 snap.lsm_accel_mg[0], snap.lsm_accel_mg[1], snap.lsm_accel_mg[2],
@@ -461,7 +498,9 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) -> ! {
                 snap.mag_mgauss[0], snap.mag_mgauss[1], snap.mag_mgauss[2], snap.mag_sample_count,
                 snap.press_hpa_x10 / 10, snap.press_hpa_x10 % 10,
                 snap.stts_temp_c_x10 / 10, (snap.stts_temp_c_x10 % 10).abs(),
-                snap.hts_humidity_x10 / 10, snap.hts_humidity_x10 % 10, snap.env_sample_count,
+                snap.hts_humidity_x10 / 10, snap.hts_humidity_x10 % 10,
+                snap.hts_temp_c_x10 / 10, (snap.hts_temp_c_x10 % 10).abs(),
+                snap.env_sample_count,
                 snap.http_request_count,
             );
 
@@ -598,21 +637,27 @@ h1{font-size:22px;font-weight:700;color:#fff}
 <div class="metric-row"><span class="metric-label">보조 가속도계 (LIS2DW12)</span><span class="metric-val" id="aux-accel">0, 0, 0<span class="unit">mg</span></span></div>
 <div class="bar-center"><div id="bar-aux" class="bar-center-fill"></div></div>
 </div>
-<div class="metric-row" style="margin-top:16px"><span class="metric-label">IMU 누적 샘플 수</span><span class="metric-val" id="imu-count">0<span class="unit">회</span></span></div>
 </div>
-<!-- ENV Card -->
+<!-- Environmental Card -->
 <div class="card">
 <div class="card-header"><span class="card-title">환경 센서 (기압/온습도)</span><span class="card-rate">1 Hz</span></div>
-<div class="metric-row"><span class="metric-label">LPS22HH 대기압</span><span class="metric-val" id="env-press">0.0<span class="unit">hPa</span></span></div>
+<div class="metric-row"><span class="metric-label">대기압 (LPS22HH)</span><span class="metric-val" id="env-press">1013.2<span class="unit">hPa</span></span></div>
 <div class="bar-track"><div id="bar-press" class="bar-fill" style="width:50%"></div></div>
-<div class="metric-row" style="margin-top:12px"><span class="metric-label">STTS751 고정밀 온도</span><span class="metric-val" id="env-temp">0.0<span class="unit">°C</span></span></div>
-<div class="bar-track"><div id="bar-temp" class="bar-fill" style="width:30%"></div></div>
-<div class="metric-row" style="margin-top:12px"><span class="metric-label">HTS221 상대 습도</span><span class="metric-val" id="env-hum">0.0<span class="unit">% rH</span></span></div>
-<div class="bar-track"><div id="bar-hum" class="bar-fill" style="width:40%"></div></div>
-<div class="metric-row" style="margin-top:14px"><span class="metric-label">HTTP 요청 수신</span><span class="metric-val" id="http-req">0<span class="unit">회</span></span></div>
+<div class="metric-row" style="margin-top:14px"><span class="metric-label">정밀 온도 (STTS751)</span><span class="metric-val" id="env-temp">24.5<span class="unit">°C</span></span></div>
+<div class="bar-track"><div id="bar-temp" class="bar-fill" style="width:40%"></div></div>
+<div class="metric-row" style="margin-top:14px"><span class="metric-label">상대 습도 (HTS221 OTP)</span><span class="metric-val" id="env-hum">45.0<span class="unit">% rH</span></span></div>
+<div class="bar-track"><div id="bar-hum" class="bar-fill" style="width:45%"></div></div>
+</div>
+<!-- System Status Card -->
+<div class="card">
+<div class="card-header"><span class="card-title">시스템 런타임 &amp; 통계</span><span class="card-rate">실시간</span></div>
+<div class="metric-row"><span class="metric-label">IMU 실시간 샘플링 누적</span><span class="metric-val" id="imu-count">0<span class="unit">회</span></span></div>
+<div class="metric-row"><span class="metric-label">HTTP REST 요청 처리</span><span class="metric-val" id="http-req">0<span class="unit">회</span></span></div>
+<div class="metric-row"><span class="metric-label">네트워크 프로토콜</span><span class="metric-val">DHCPv4 / HTTP 1.1</span></div>
+<div class="metric-row"><span class="metric-label">하드웨어 아키텍처</span><span class="metric-val">Cortex-M7 480MHz</span></div>
 </div>
 </div>
-<div class="footer">NUCLEO-H743ZI2 &bull; LAN8742A RMII Ethernet &bull; embassy-rs no_std HTTP Server</div>
+<div class="footer">NUCLEO-H743ZI2 + X-NUCLEO-IKS01A3 Firmware &bull; Embassy Async Framework</div>
 </div>
 <script>
 async function updateTelemetry(){

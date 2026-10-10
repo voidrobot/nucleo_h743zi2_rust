@@ -11,6 +11,9 @@ use panic_probe as _;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::peripherals::{PB0, PB14, PE1};
 
+pub mod iks01a3;
+pub mod uid;
+
 /// NUCLEO-H743ZI2 온보드 핀아웃 매핑
 pub mod pins {
     //! - LED1 (Green): PB0

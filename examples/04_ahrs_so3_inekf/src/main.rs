@@ -25,8 +25,13 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_io_async::Write as _;
 use heapless::String;
+use nucleo_bsp::iks01a3::registers::*;
+use nucleo_bsp::iks01a3::sensitivity::*;
+use nucleo_bsp::iks01a3::{ADDR_LIS2MDL, ADDR_LSM6DSO};
+use nucleo_bsp::uid;
 use nucleo_bsp::BoardLeds;
 use so3_inekf::RightInvariantInEKF;
+use static_cell::StaticCell;
 
 // 1. 하드웨어 인터럽트 바인딩 (I2C1 + ETH)
 bind_interrupts!(struct Irqs {
@@ -123,29 +128,23 @@ static IDLE_CYCLES_1SEC: core::sync::atomic::AtomicU32 = core::sync::atomic::Ato
 // 1초 동안 RT 인터럽트 도메인(InEKF 필터 연산)에서 소비한 하드웨어 클럭 사이클 누적기
 static RT_CYCLES_1SEC: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-// 5. 이더넷 패킷 큐 및 네트워크 스택 리소스 (정적 할당)
-static mut PACKET_QUEUE: PacketQueue<4, 4> = PacketQueue::new();
-static mut STACK_RESOURCES: embassy_net::StackResources<4> = embassy_net::StackResources::new();
+// 6. 이더넷 패킷 큐 및 네트워크 스택 리소스 (StaticCell 기반 안전 정적 할당)
+static PACKET_QUEUE: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
+static STACK_RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
 
 type Device = Ethernet<'static, ETH, GenericSMI>;
-
-// I2C 디바이스 주소
-const ADDR_LSM6DSO: u8 = 0x6B;
-const ADDR_LIS2MDL: u8 = 0x1E;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let p = embassy_stm32::init(Default::default());
     info!(">>> NUCLEO-H743ZI2 SO(3) Right-Invariant InEKF AHRS 시작 <<<");
 
-    // ARM Cortex-M7 DWT 하드웨어 사이클 카운터 활성화 (TRCENA + CYCCNTENA)
+    // ARM Cortex-M7 DWT 하드웨어 사이클 카운터 활성화 (cortex-m HAL 정규 표준 API)
     unsafe {
-        const DCB_DEMCR: *mut u32 = 0xE000_EDFC as *mut u32;
-        const DWT_CTRL: *mut u32 = 0xE000_1000 as *mut u32;
-        let demcr = core::ptr::read_volatile(DCB_DEMCR);
-        core::ptr::write_volatile(DCB_DEMCR, demcr | (1 << 24));
-        let ctrl = core::ptr::read_volatile(DWT_CTRL);
-        core::ptr::write_volatile(DWT_CTRL, ctrl | 1);
+        let mut cp = cortex_m::peripheral::Peripherals::steal();
+        cp.DCB.enable_trace();
+        cortex_m::peripheral::DWT::unlock();
+        cp.DWT.enable_cycle_counter();
     }
 
     let executor = cortex_m::singleton!(: embassy_executor::raw::Executor = embassy_executor::raw::Executor::new(core::ptr::null_mut())).unwrap();
@@ -208,9 +207,9 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
     // [Task 2] 10 Hz 지자기 센서 비동기 관측 루프 스폰
     spawner.must_spawn(task_mag_sampling());
 
-    // [Task 3] LAN8742A RMII 이더넷 드라이버 초기화 및 DHCPv4 네트워크 스택
-    let mac_addr = [0x00, 0x80, 0xE1, 0xDE, 0xAD, 0x04];
-    let queue = unsafe { &mut *core::ptr::addr_of_mut!(PACKET_QUEUE) };
+    // [Task 3] LAN8742A RMII 이더넷 드라이버 초기화 (STM32 고유 UID 기반 EUI-48 MAC 주소)
+    let mac_addr = uid::get_unique_mac_address();
+    let queue = PACKET_QUEUE.init(PacketQueue::new());
 
     let eth_device = Ethernet::new(
         queue,
@@ -228,10 +227,13 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
         GenericSMI::new(0),
         mac_addr,
     );
+    info!("LAN8742A RMII 이더넷 드라이버 초기화 완료 (STM32 UID MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+        mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]
+    );
 
-    let net_seed = 0x1234_5678_9ABC_DEF4;
+    let net_seed = uid::get_uid_prng_seed();
     let net_config = embassy_net::Config::dhcpv4(Default::default());
-    let resources = unsafe { &mut *core::ptr::addr_of_mut!(STACK_RESOURCES) };
+    let resources = STACK_RESOURCES.init(embassy_net::StackResources::new());
 
     let (stack, runner) = embassy_net::new(eth_device, net_config, resources, net_seed);
 
@@ -240,28 +242,34 @@ async fn main_task(spawner: Spawner, p: embassy_stm32::Peripherals) {
     spawner.must_spawn(task_rtt_reporter(stack));
 }
 
-/// [초기화] LSM6DSO (IMU) 및 LIS2MDL (지자기) 레지스터 설정
+/// [초기화] LSM6DSO (IMU) 및 LIS2MDL (지자기) 레지스터 설정 (BSP 상수 연동)
 async fn init_sensors() {
     let mut bus_guard = I2C_BUS.lock().await;
-    let i2c = bus_guard.as_mut().unwrap();
+    let i2c = bus_guard.as_mut().expect("I2C 버스 미초기화");
 
     // 1. LSM6DSO 초기화
     let mut whoami = [0u8; 1];
-    let _ = i2c.write_read(ADDR_LSM6DSO, &[0x0F], &mut whoami).await;
-    info!("LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x6C)", whoami[0]);
+    if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[REG_WHO_AM_I], &mut whoami).await {
+        error!("LSM6DSO WHO_AM_I 읽기 실패: {:?}", e);
+    } else {
+        info!("LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", whoami[0], ID_LSM6DSO);
+    }
 
-    let _ = i2c.write(ADDR_LSM6DSO, &[0x10, 0x40]).await; // Accel 104Hz, ±2g
-    let _ = i2c.write(ADDR_LSM6DSO, &[0x11, 0x40]).await; // Gyro 104Hz, ±250dps
+    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_104HZ_2G]).await;
+    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_104HZ_250DPS]).await;
 
     // 2. LIS2MDL 초기화
     let mut mag_who = [0u8; 1];
-    let _ = i2c.write_read(ADDR_LIS2MDL, &[0x4F], &mut mag_who).await;
-    info!("LIS2MDL WHO_AM_I: 0x{:02X} (기대값: 0x40)", mag_who[0]);
+    if let Err(e) = i2c.write_read(ADDR_LIS2MDL, &[REG_LIS2MDL_WHO_AM_I], &mut mag_who).await {
+        error!("LIS2MDL WHO_AM_I 읽기 실패: {:?}", e);
+    } else {
+        info!("LIS2MDL WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", mag_who[0], ID_LIS2MDL);
+    }
 
-    let _ = i2c.write(ADDR_LIS2MDL, &[0x60, 0x80]).await; // 리셋
+    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_RESET]).await;
     Timer::after_millis(10).await;
-    let _ = i2c.write(ADDR_LIS2MDL, &[0x60, 0x00]).await; // 10Hz 연속 모드
-    let _ = i2c.write(ADDR_LIS2MDL, &[0x62, 0x10]).await; // BDU = 1
+    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_A, lis2mdl::VAL_CFG_REG_A_10HZ_CONT]).await;
+    let _ = i2c.write(ADDR_LIS2MDL, &[lis2mdl::CFG_REG_C, lis2mdl::VAL_CFG_REG_C_BDU]).await;
 }
 
 /// [Task 1: 100 Hz 하드 실시간 RT-IMU 선점 루프]
@@ -284,7 +292,7 @@ async fn task_imu_high_priority_rt() {
         {
             let mut bus_guard = I2C_BUS.lock().await;
             if let Some(i2c) = bus_guard.as_mut() {
-                let _ = i2c.write_read(ADDR_LSM6DSO, &[0x22], &mut buf).await;
+                let _ = i2c.write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_G], &mut buf).await;
             }
         }
 
@@ -299,25 +307,23 @@ async fn task_imu_high_priority_rt() {
         let ay_raw = i16::from_le_bytes([buf[8], buf[9]]);
         let az_raw = i16::from_le_bytes([buf[10], buf[11]]);
 
-        // 물리 단위 변환
-        // Gyro ±250 dps: 8.75 mdps/LSB -> dps -> rad/s
-        let gx_dps = gx_raw as f32 * 0.00875;
-        let gy_dps = gy_raw as f32 * 0.00875;
-        let gz_dps = gz_raw as f32 * 0.00875;
-        let gyro_radps = [gx_dps * PI / 180.0, gy_dps * PI / 180.0, gz_dps * PI / 180.0];
+        // 물리 단위 변환 (BSP 정밀 감도 및 상수 모듈 적용)
+        let gx_dps = lsm6dso::raw_to_dps_f32(gx_raw);
+        let gy_dps = lsm6dso::raw_to_dps_f32(gy_raw);
+        let gz_dps = lsm6dso::raw_to_dps_f32(gz_raw);
+        let gyro_radps = [gx_dps * DEG_TO_RAD, gy_dps * DEG_TO_RAD, gz_dps * DEG_TO_RAD];
 
-        // Accel ±2g: 0.061 mg/LSB -> mg -> m/s^2
-        let ax_mg = (ax_raw as f32 * 0.061) as i16;
-        let ay_mg = (ay_raw as f32 * 0.061) as i16;
-        let az_mg = (az_raw as f32 * 0.061) as i16;
+        let ax_mg = lsm6dso::raw_to_mg(ax_raw);
+        let ay_mg = lsm6dso::raw_to_mg(ay_raw);
+        let az_mg = lsm6dso::raw_to_mg(az_raw);
         let accel_mps2 = [
-            ax_mg as f32 * 0.001 * 9.80665,
-            ay_mg as f32 * 0.001 * 9.80665,
-            az_mg as f32 * 0.001 * 9.80665,
+            ax_mg as f32 * 0.001 * STANDARD_GRAVITY,
+            ay_mg as f32 * 0.001 * STANDARD_GRAVITY,
+            az_mg as f32 * 0.001 * STANDARD_GRAVITY,
         ];
 
-        // 2. SO(3) Right-Invariant InEKF 연산
-        let dt_s = 0.01f32; // 100 Hz = 0.01초
+        // 2. SO(3) Right-Invariant InEKF 연산 (실측 가변 dt_s 반영 및 0.001~0.05초 안전 클램핑)
+        let dt_s = (dt_us as f32 * 1e-6).clamp(0.001, 0.05);
         let mut filter = INEKF_FILTER.lock().await;
         // 정지 상태(Stillness / ZARU) 감지 및 바이어스 적응 갱신
         filter.update_stillness(gyro_radps, accel_mps2);
@@ -329,9 +335,9 @@ async fn task_imu_high_priority_rt() {
         let quat = filter.rot.to_quaternion();
         let rot_m = filter.rot.data;
         let bias_dps = [
-            filter.bias_gyro[0] * 180.0 / PI,
-            filter.bias_gyro[1] * 180.0 / PI,
-            filter.bias_gyro[2] * 180.0 / PI,
+            filter.bias_gyro[0] * RAD_TO_DEG,
+            filter.bias_gyro[1] * RAD_TO_DEG,
+            filter.bias_gyro[2] * RAD_TO_DEG,
         ];
         let trace = filter.cov_trace();
         let is_stationary = filter.is_stationary;
@@ -369,7 +375,7 @@ async fn task_mag_sampling() {
         {
             let mut bus_guard = I2C_BUS.lock().await;
             if let Some(i2c) = bus_guard.as_mut() {
-                let _ = i2c.write_read(ADDR_LIS2MDL, &[0x68], &mut buf).await;
+                let _ = i2c.write_read(ADDR_LIS2MDL, &[lis2mdl::OUTX_L_REG], &mut buf).await;
             }
         }
 
@@ -377,10 +383,10 @@ async fn task_mag_sampling() {
         let my_raw = i16::from_le_bytes([buf[2], buf[3]]);
         let mz_raw = i16::from_le_bytes([buf[4], buf[5]]);
 
-        // LIS2MDL: 1.5 mgauss/LSB
-        let mx_mgauss = (mx_raw as f32 * 1.5) as i16;
-        let my_mgauss = (my_raw as f32 * 1.5) as i16;
-        let mz_mgauss = (mz_raw as f32 * 1.5) as i16;
+        // LIS2MDL 정밀 감도 모듈 적용 (1.5 mgauss/LSB)
+        let mx_mgauss = lis2mdl::raw_to_mgauss(mx_raw);
+        let my_mgauss = lis2mdl::raw_to_mgauss(my_raw);
+        let mz_mgauss = lis2mdl::raw_to_mgauss(mz_raw);
 
         let mx_f = mx_mgauss as f32;
         let my_f = my_mgauss as f32;

@@ -25,6 +25,7 @@ embassy-sync = { version = "0.6.2", features = ["defmt"] }
 embassy-net = { version = "0.6.0", features = ["defmt", "tcp", "dhcpv4", "medium-ethernet"] }
 embedded-io-async = "0.6.1"
 heapless = "0.8"
+static_cell = "2.1"
 
 # defmt 고속 RTT 로깅 및 패닉 핸들러
 defmt = "0.3.10"

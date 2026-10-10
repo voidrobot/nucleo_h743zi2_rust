@@ -18,4 +18,5 @@ embassy-net.workspace = true
 embedded-io-async.workspace = true
 embedded-hal-async.workspace = true
 heapless.workspace = true
+static_cell.workspace = true
 defmt.workspace = true

@@ -10,6 +10,9 @@ use embassy_stm32::bind_interrupts;
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::time::Hertz;
 use embassy_time::{Duration, Ticker};
+use nucleo_bsp::iks01a3::registers::*;
+use nucleo_bsp::iks01a3::sensitivity::*;
+use nucleo_bsp::iks01a3::ADDR_LSM6DSO;
 use nucleo_bsp::BoardLeds;
 
 use mixed_cpp_legacy_05::cpp_bridge::SafeBiquadFilter;
@@ -18,8 +21,6 @@ bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
 });
-
-const ADDR_LSM6DSO: u8 = 0x6B;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -46,17 +47,17 @@ async fn main(_spawner: Spawner) {
 
     // 2. LSM6DSO 6축 IMU 센서 WHO_AM_I 검증 및 활성화
     let mut who = [0u8; 1];
-    if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[0x0F], &mut who).await {
+    if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[REG_WHO_AM_I], &mut who).await {
         error!("LSM6DSO WHO_AM_I 읽기 실패: {:?}", e);
         leds.red.set_high();
         return;
     }
-    info!("LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x6C)", who[0]);
+    info!("LSM6DSO WHO_AM_I: 0x{:02X} (기대값: 0x{:02X})", who[0], ID_LSM6DSO);
 
     // CTRL1_XL = 0x62 (416Hz ODR, ±2g, LPF2 활성화)
-    let _ = i2c.write(ADDR_LSM6DSO, &[0x10, 0x62]).await;
+    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL1_XL, lsm6dso::VAL_CTRL1_XL_416HZ_2G_LPF2]).await;
     // CTRL2_G = 0x60 (416Hz ODR, ±250dps)
-    let _ = i2c.write(ADDR_LSM6DSO, &[0x11, 0x60]).await;
+    let _ = i2c.write(ADDR_LSM6DSO, &[lsm6dso::CTRL2_G, lsm6dso::VAL_CTRL2_G_416HZ_250DPS]).await;
     info!("LSM6DSO 416Hz ODR 하드웨어 가속도계 가동 완료");
 
     // 3. 레거시 C++ Biquad 필터 인스턴스 초기화 (Zero-Allocation 인라인 스택 할당)
@@ -77,8 +78,8 @@ async fn main(_spawner: Spawner) {
         ticker.next().await;
         count = count.wrapping_add(1);
 
-        // LSM6DSO 가속도계 데이터 레지스터 (0x28: OUTX_L_A ~ OUTZ_H_A) 6바이트 버스트 읽기
-        if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[0x28], &mut accel_buf).await {
+        // LSM6DSO 가속도계 데이터 레지스터 (OUTX_L_A ~ OUTZ_H_A) 6바이트 버스트 읽기
+        if let Err(e) = i2c.write_read(ADDR_LSM6DSO, &[lsm6dso::OUTX_L_A], &mut accel_buf).await {
             warn!("가속도계 읽기 오류: {:?}", e);
             continue;
         }
@@ -87,10 +88,10 @@ async fn main(_spawner: Spawner) {
         let ay_raw = i16::from_le_bytes([accel_buf[2], accel_buf[3]]);
         let az_raw = i16::from_le_bytes([accel_buf[4], accel_buf[5]]);
 
-        // ±2g 범위: 0.061 mg/LSB
-        let ax_mg = ax_raw as f32 * 0.061;
-        let ay_mg = ay_raw as f32 * 0.061;
-        let az_mg = az_raw as f32 * 0.061;
+        // ±2g 범위 정밀 감도 모듈 적용 (0.061 mg/LSB)
+        let ax_mg = lsm6dso::raw_to_mg_f32(ax_raw);
+        let ay_mg = lsm6dso::raw_to_mg_f32(ay_raw);
+        let az_mg = lsm6dso::raw_to_mg_f32(az_raw);
 
         // --- C++ 레거시 Direct Form II Transposed Biquad LPF FFI 호출 ---
         let ax_filt = filter_x.process(ax_mg);
