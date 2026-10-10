@@ -32,16 +32,16 @@ flowchart TD
     subgraph BuildTime["빌드 타임 파이프라인 (Cargo + build.rs)"]
         A["cargo build --target thumbv7em-none-eabihf"] --> B["build.rs 실행"]
         B --> C["cc::Build 크로스 컴파일러 호출"]
-        C -->|clang++-18 / -mcpu=cortex-m7 / -fno-exceptions / -fno-rtti| D["cpp/src/biquad_filter.cpp"]
+        C -->|"clang++-18 / -mcpu=cortex-m7 / -fno-exceptions / -fno-rtti"| D["cpp/src/biquad_filter.cpp"]
         D --> E["liblegacy_dsp.a (정적 아카이브)"]
-        E -->|rust-lld 정적 링크 (cpp_link_stdlib: None)| F["mixed_cpp_legacy_05 ELF 바이너리"]
+        E -->|"rust-lld 정적 링크 (cpp_link_stdlib: None)"| F["mixed_cpp_legacy_05 ELF 바이너리"]
     end
 
     subgraph Runtime["런타임 실행 흐름 (100 Hz RT 센서 루프)"]
-        G["IKS01A3 LSM6DSO 6축 IMU"] -->|I2C1 DMA 400kHz| H["Embassy 비동기 루프 (Rust main.rs)"]
-        H -->|원시 가속도 데이터 (mg)| I["SafeBiquadFilter (Rust RAII 래퍼)"]
-        I -->|extern 'C' FFI 무오버헤드 호출| J["C++ BiquadFilter::process (Direct Form II Transposed)"]
-        J -->|평활화된 가속도 출력 (mg)| K["defmt / RTT 실시간 로깅 및 LED 하트비트"]
+        G["IKS01A3 LSM6DSO 6축 IMU"] -->|"I2C1 DMA 400kHz"| H["Embassy 비동기 루프 (Rust main.rs)"]
+        H -->|"원시 가속도 데이터 (mg)"| I["SafeBiquadFilter (Rust RAII 래퍼)"]
+        I -->|"extern C FFI 무오버헤드 호출"| J["C++ BiquadFilter::process (Direct Form II Transposed)"]
+        J -->|"평활화된 가속도 출력 (mg)"| K["defmt / RTT 실시간 로깅 및 LED 하트비트"]
     end
 ```
 
@@ -109,10 +109,14 @@ cargo size --target thumbv7em-none-eabihf -p mixed_cpp_legacy_05 --release -- -A
 - **RAM (`.data` + `.bss`)**: 약 **33.4 KB**
 
 ### ③ ST-LINK/V3E 플래시 및 RTT 실시간 모니터링
-타깃 보드에 다운로드하고 RTT 로그를 통해 C++ Biquad 필터의 실시간 동작을 확인한다:
+`.cargo/config.toml`에 사전 설정된 Runner를 통해 빌드, 다운로드, RTT 수신을 원스톱으로 실행한다:
 
 ```bash
-probe-rs run --chip STM32H743ZITx --catch-reset target/thumbv7em-none-eabihf/release/mixed_cpp_legacy_05
+# Debug 바이너리 빌드 및 플래시 실행
+cargo run -p mixed_cpp_legacy_05
+
+# Release 최적화 바이너리 빌드 및 플래시 실행 (권장)
+cargo run -p mixed_cpp_legacy_05 --release
 ```
 
 **실측 출력 예시 (100 Hz 센서 루프)**:
