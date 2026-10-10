@@ -56,6 +56,47 @@ unsafe fn CEC() {
     EXECUTOR_HIGH.on_interrupt();
 }
 
+// 리눅스 /proc/stat 틱 샘플링 통계 카운터 및 코어 상태 플래그
+static IS_SLEEPING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static IS_RT_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static TICK_IDLE_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static TICK_BUSY_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// [리눅스 /proc/stat 1 kHz 틱 샘플러 ISR]
+/// 1ms마다 발생하는 하드웨어 타이머 인터럽트 시점의 CPU 실행 컨텍스트 스냅샷
+#[embassy_stm32::interrupt]
+unsafe fn TIM7() {
+    let tim = embassy_stm32::pac::TIM7;
+    tim.sr().write(|w| w.set_uif(false));
+
+    // 코어가 WFE 저전력 슬립 중이고, RT 선점 인터럽트가 실행 중이지 않을 때만 순수 IDLE로 판정
+    if IS_SLEEPING.load(core::sync::atomic::Ordering::Relaxed)
+        && !IS_RT_ACTIVE.load(core::sync::atomic::Ordering::Relaxed)
+    {
+        TICK_IDLE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        TICK_BUSY_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// STM32H743 기본 타이머 TIM7을 1,000 Hz (1ms 주기) 틱 샘플러로 초기화
+unsafe fn init_proc_stat_timer() {
+    embassy_stm32::pac::RCC
+        .apb1lenr()
+        .modify(|w| w.set_tim7en(true));
+    let tim = embassy_stm32::pac::TIM7;
+    tim.cr1().write(|w| w.set_cen(false));
+    tim.psc().write_value(63); // 64MHz -> 1MHz (1µs)
+    tim.arr().write(|w| w.set_arr(999)); // 1MHz / 1000 = 1000Hz (1ms)
+    tim.cnt().write(|w| w.set_cnt(0));
+    tim.sr().write(|w| w.set_uif(false));
+    tim.dier().write(|w| w.set_uie(true));
+    tim.cr1().write(|w| w.set_cen(true));
+
+    interrupt::TIM7.set_priority(Priority::P5);
+    interrupt::TIM7.enable();
+}
+
 // 3. I2C 버스 뮤텍스
 type I2cBus = Mutex<CriticalSectionRawMutex, Option<I2c<'static, embassy_stm32::mode::Async>>>;
 static I2C_BUS: I2cBus = Mutex::new(None);
@@ -127,11 +168,6 @@ static AHRS_SNAPSHOT: Mutex<CriticalSectionRawMutex, AhrsSnapshot> = Mutex::new(
     http_request_count: 0,
 });
 
-// 1초 동안 코어가 WFE(슬립)에 머문 구간 클럭 사이클 누적기
-static IDLE_CYCLES_1SEC: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-// 1초 동안 RT 인터럽트 도메인(InEKF 필터 연산)에서 소비한 하드웨어 클럭 사이클 누적기
-static RT_CYCLES_1SEC: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
 // 6. 이더넷 패킷 큐 및 네트워크 스택 리소스 (StaticCell 기반 안전 정적 할당)
 static PACKET_QUEUE: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
 static STACK_RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
@@ -143,12 +179,15 @@ fn main() -> ! {
     let p = embassy_stm32::init(Default::default());
     info!(">>> NUCLEO-H743ZI2 SO(3) Right-Invariant InEKF AHRS 시작 <<<");
 
-    // ARM Cortex-M7 DWT 하드웨어 사이클 카운터 활성화 (cortex-m HAL 정규 표준 API)
+    // ARM Cortex-M7 DWT 하드웨어 사이클 카운터 활성화 (InEKF 마이크로초 정밀 프로파일링용)
     unsafe {
         let mut cp = cortex_m::peripheral::Peripherals::steal();
         cp.DCB.enable_trace();
         cortex_m::peripheral::DWT::unlock();
         cp.DWT.enable_cycle_counter();
+
+        // 리눅스 /proc/stat 스타일 1 kHz 틱 샘플러 타이머 가동
+        init_proc_stat_timer();
     }
 
     let executor = cortex_m::singleton!(: embassy_executor::raw::Executor = embassy_executor::raw::Executor::new(core::ptr::null_mut())).unwrap();
@@ -156,17 +195,15 @@ fn main() -> ! {
 
     spawner.must_spawn(main_task(spawner, p));
 
+    // 리눅스 /proc/stat 무오버헤드 저전력 메인 루프 (DWT 역산 및 사후 차감 전면 소각)
     loop {
+        IS_SLEEPING.store(false, core::sync::atomic::Ordering::Relaxed);
         unsafe {
             executor.poll();
         }
-
-        let t_sleep_start = cortex_m::peripheral::DWT::cycle_count();
+        IS_SLEEPING.store(true, core::sync::atomic::Ordering::Release);
         cortex_m::asm::wfe();
-        let t_sleep_end = cortex_m::peripheral::DWT::cycle_count();
-
-        let elapsed_idle = t_sleep_end.wrapping_sub(t_sleep_start);
-        IDLE_CYCLES_1SEC.fetch_add(elapsed_idle, core::sync::atomic::Ordering::Relaxed);
+        IS_SLEEPING.store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -352,8 +389,8 @@ async fn task_imu_high_priority_rt() {
         }
 
         // --- 순수 CPU 연산 구간 시작 (I2C 버스 대기 제외) ---
+        IS_RT_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
         let t_calc_start = Instant::now();
-        let t_dwt_start = cortex_m::peripheral::DWT::cycle_count();
 
         let gx_raw = i16::from_le_bytes([buf[0], buf[1]]);
         let gy_raw = i16::from_le_bytes([buf[2], buf[3]]);
@@ -420,8 +457,7 @@ async fn task_imu_high_priority_rt() {
         snap.imu_dt_us = dt_us;
         snap.inekf_calc_us = calc_us;
 
-        let rt_cycles = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(t_dwt_start);
-        RT_CYCLES_1SEC.fetch_add(rt_cycles, core::sync::atomic::Ordering::Relaxed);
+        IS_RT_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -593,7 +629,6 @@ async fn task_web_server(stack: embassy_net::Stack<'static>) {
 #[embassy_executor::task]
 async fn task_rtt_reporter(stack: embassy_net::Stack<'static>) {
     let mut ticker = Ticker::every(Duration::from_hz(1));
-    let mut last_total_cycle = cortex_m::peripheral::DWT::cycle_count();
     loop {
         ticker.next().await;
 
@@ -602,23 +637,17 @@ async fn task_rtt_reporter(stack: embassy_net::Stack<'static>) {
             *s
         };
 
-        // 1초 동안 흐른 실제 총 하드웨어 사이클 및 WFE(슬립) 유휴 사이클 계측 (자가 보정)
-        let now_cycle = cortex_m::peripheral::DWT::cycle_count();
-        let total_cycles = now_cycle.wrapping_sub(last_total_cycle);
-        last_total_cycle = now_cycle;
+        // 리눅스 /proc/stat 1 kHz 하드웨어 틱 통계 샘플링 회계 (사후 차감 보정식 전면 소각)
+        let idle_ticks = TICK_IDLE_COUNT.swap(0, core::sync::atomic::Ordering::Relaxed);
+        let busy_ticks = TICK_BUSY_COUNT.swap(0, core::sync::atomic::Ordering::Relaxed);
+        let total_ticks = idle_ticks + busy_ticks;
 
-        let wfe_cycles = IDLE_CYCLES_1SEC.swap(0, core::sync::atomic::Ordering::Relaxed);
-        let rt_cycles = RT_CYCLES_1SEC.swap(0, core::sync::atomic::Ordering::Relaxed);
-
-        // WFE 슬립 기간 중 RT 인터럽트가 선점 실행된 사이클을 제외한 순수 유휴 사이클 산출
-        let pure_idle_cycles = wfe_cycles.saturating_sub(rt_cycles);
-        let idle_ratio = if total_cycles > 0 {
-            (pure_idle_cycles as f32) / (total_cycles as f32)
+        let (cpu_load_pct, idle_pct) = if total_ticks > 0 {
+            let load = (busy_ticks as f32 / total_ticks as f32) * 100.0;
+            (load.clamp(0.0, 100.0), (100.0 - load).clamp(0.0, 100.0))
         } else {
-            1.0
+            (0.0, 100.0)
         };
-        let cpu_load_pct = (1.0 - idle_ratio).clamp(0.0, 1.0) * 100.0;
-        let idle_pct = (idle_ratio * 100.0).clamp(0.0, 100.0);
 
         {
             let mut s = AHRS_SNAPSHOT.lock().await;
