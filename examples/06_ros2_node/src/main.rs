@@ -8,6 +8,7 @@
 
 mod cdr;
 mod zenoh_wire;
+mod picoros_sys;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use defmt::*;
@@ -25,6 +26,7 @@ use embassy_stm32::{bind_interrupts, eth, i2c, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Ticker};
+use embassy_futures::select::{select, Either};
 use panic_probe as _;
 use static_cell::StaticCell;
 
@@ -291,12 +293,33 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
         return;
     }
 
-    info!("[Zenoh] 7447 바인드 완료. 텔레메트리 및 수신 서비스 시작.");
+    info!("[Zenoh] 7447 바인드 완료. DHCP IP 할당 대기...");
+    while !stack.is_config_up() {
+        embassy_time::Timer::after(Duration::from_millis(100)).await;
+    }
+    info!("[Zenoh] 네트워크 활성화 완료. 텔레메트리 및 수신 서비스 시작.");
 
-    let remote_bcast = embassy_net::IpEndpoint::new(
-        embassy_net::IpAddress::Ipv4(Ipv4Address::new(255, 255, 255, 255)),
+    let remote_host = embassy_net::IpEndpoint::new(
+        embassy_net::IpAddress::Ipv4(Ipv4Address::new(192, 168, 50, 15)),
         ZENOH_UDP_PORT,
     );
+    let remote_bcast = embassy_net::IpEndpoint::new(
+        embassy_net::IpAddress::Ipv4(Ipv4Address::new(192, 168, 50, 255)),
+        ZENOH_UDP_PORT,
+    );
+
+    let mut pico_node: Option<picoros_sys::PicoRosNode> = None;
+    let mut pub_imu: Option<picoros_sys::PicoRosPublisher> = None;
+    let mut pub_mag: Option<picoros_sys::PicoRosPublisher> = None;
+    let mut pub_press: Option<picoros_sys::PicoRosPublisher> = None;
+    let mut pub_temp: Option<picoros_sys::PicoRosPublisher> = None;
+    let mut pub_hum: Option<picoros_sys::PicoRosPublisher> = None;
+
+    let mut frame_buf = [0u8; 1500];
+    let mut rx_packet = [0u8; 1500];
+    let mut cdr_buf = [0u8; 1024];
+    let mut ffi_tx_buf = [0u8; 1500];
+    let mut att_buf = [0u8; 33];
 
     let mut seq: u32 = 0;
     let mut ticker_100hz = Ticker::every(Duration::from_hz(100));
@@ -305,98 +328,197 @@ async fn task_zenoh_udp(stack: Stack<'static>) {
 
     let cov_mag = [1e-6, 0.0, 0.0, 0.0, 1e-6, 0.0, 0.0, 0.0, 1e-6];
 
-    let mut cdr_buf = [0u8; 512];
-    let mut frame_buf = [0u8; 640];
+    let zid_bytes: [u8; 16] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+    ];
+
+    let mut session_established = false;
+    let mut init_timer_tick: u8 = 0;
+
+    // 라우터(192.168.50.15:7447)에 세션 초기화 InitSyn 최초 전송
+    let init_len = ZenohWire::build_init_syn(&mut frame_buf, &zid_bytes);
+    let _ = socket.send_to(&frame_buf[..init_len], remote_host).await;
 
     loop {
-        ticker_100hz.next().await;
-        div_10hz = (div_10hz + 1) % 10;
-        div_1hz = (div_1hz + 1) % 100;
-
-        // 1. 100 Hz IMU 데이터 발행
-        let snap = *IMU_SNAPSHOT.lock().await;
-        let cdr_len = Ros2Cdr::encode_imu(
-            &mut cdr_buf,
-            snap.sec,
-            snap.nanosec,
-            snap.quat_xyzw,
-            &snap.cov_orient,
-            snap.ang_vel,
-            &snap.cov_ang_vel,
-            snap.linear_accel,
-            &snap.cov_linear_accel,
-        );
-
-        seq = seq.wrapping_add(1);
-        let key_imu = "0/nucleo/imu/data";
-        let frame_len = ZenohWire::build_push_put(&mut frame_buf, seq, key_imu, &cdr_buf[..cdr_len]);
-        let _ = socket.send_to(&frame_buf[..frame_len], remote_bcast).await;
-
-        // 2. 10 Hz 지자기 데이터 발행
-        if div_10hz == 0 {
-            let env = *ENV_DATA.lock().await;
-            let cdr_len = Ros2Cdr::encode_mag(&mut cdr_buf, snap.sec, snap.nanosec, env.mag_tesla, &cov_mag);
-            seq = seq.wrapping_add(1);
-            let key_mag = "0/nucleo/imu/mag";
-            let frame_len = ZenohWire::build_push_put(&mut frame_buf, seq, key_mag, &cdr_buf[..cdr_len]);
-            let _ = socket.send_to(&frame_buf[..frame_len], remote_bcast).await;
-        }
-
-        // 3. 1 Hz 기압, 온도, 습도 발행
-        if div_1hz == 0 {
-            let env = *ENV_DATA.lock().await;
-
-            // Pressure
-            let p_len = Ros2Cdr::encode_pressure(&mut cdr_buf, snap.sec, snap.nanosec, env.pressure_pa, 0.0);
-            seq = seq.wrapping_add(1);
-            let f_len = ZenohWire::build_push_put(&mut frame_buf, seq, "0/nucleo/pressure", &cdr_buf[..p_len]);
-            let _ = socket.send_to(&frame_buf[..f_len], remote_bcast).await;
-
-            // Temperature
-            let t_len = Ros2Cdr::encode_temperature(&mut cdr_buf, snap.sec, snap.nanosec, env.temperature_c, 0.0);
-            seq = seq.wrapping_add(1);
-            let f_len = ZenohWire::build_push_put(&mut frame_buf, seq, "0/nucleo/temperature", &cdr_buf[..t_len]);
-            let _ = socket.send_to(&frame_buf[..f_len], remote_bcast).await;
-
-            // Humidity
-            let h_len = Ros2Cdr::encode_humidity(&mut cdr_buf, snap.sec, snap.nanosec, env.humidity_ratio, 0.0);
-            seq = seq.wrapping_add(1);
-            let f_len = ZenohWire::build_push_put(&mut frame_buf, seq, "0/nucleo/humidity", &cdr_buf[..h_len]);
-            let _ = socket.send_to(&frame_buf[..f_len], remote_bcast).await;
-        }
-
-        // 4. 수신 패킷 처리 (Non-blocking 폴링)
-        let mut rx_packet = [0u8; 512];
-        if let Ok((len, remote)) = socket.recv_from(&mut rx_packet).await {
-            if let Some((msg_type, key_expr, q_id, payload)) = ZenohWire::parse_frame(&rx_packet[..len]) {
-                if key_expr == "0/nucleo/cmd_vel" && msg_type == msg_id::PUSH {
-                    if let Some(([lx, _ly, _lz], [_ax, _ay, az])) = Ros2Cdr::decode_twist(payload) {
-                        info!("[ROS2 cmd_vel] linear.x={=f64} m/s, angular.z={=f64} rad/s", lx, az);
+        match select(ticker_100hz.next(), socket.recv_from(&mut rx_packet)).await {
+            Either::First(_) => {
+                if !session_established {
+                    init_timer_tick = (init_timer_tick + 1) % 50; // 500ms 주기
+                    if init_timer_tick == 0 {
+                        let init_len = ZenohWire::build_init_syn(&mut frame_buf, &zid_bytes);
+                        let _ = socket.send_to(&frame_buf[..init_len], remote_host).await;
                     }
-                } else if key_expr == "0/nucleo/set_led" && msg_type == msg_id::QUERY {
-                    if let Some(turn_on) = Ros2Cdr::decode_set_bool_request(payload) {
-                        let mut led_guard = USER_LED.lock().await;
-                        if let Some(ref mut led) = *led_guard {
-                            if turn_on {
-                                led.set_high();
-                            } else {
-                                led.set_low();
-                            }
-                        }
-                        info!("[ROS2 Service] /nucleo/set_led -> data={=bool} 처리 완료", turn_on);
+                    continue;
+                }
 
-                        // Response 직렬화 및 Zenoh REPLY 전송
-                        let resp_len = Ros2Cdr::encode_set_bool_response(
-                            &mut cdr_buf,
-                            true,
-                            if turn_on { "LED ON" } else { "LED OFF" },
-                        );
+                div_10hz = (div_10hz + 1) % 10;
+                div_1hz = (div_1hz + 1) % 100;
+
+                // 1. 100 Hz IMU 데이터 발행
+                let snap = *IMU_SNAPSHOT.lock().await;
+                let cdr_len = Ros2Cdr::encode_imu(
+                    &mut cdr_buf,
+                    snap.sec,
+                    snap.nanosec,
+                    snap.quat_xyzw,
+                    &snap.cov_orient,
+                    snap.ang_vel,
+                    &snap.cov_ang_vel,
+                    snap.linear_accel,
+                    &snap.cov_linear_accel,
+                );
+
+                seq = seq.wrapping_add(1);
+                let time_ns = (snap.sec as i64) * 1_000_000_000 + (snap.nanosec as i64);
+                ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
+                let key_imu = "0/nucleo/imu/data/sensor_msgs::msg::dds_::Imu_/RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b";
+                let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, key_imu, Some(&att_buf), &cdr_buf[..cdr_len]);
+                let _ = socket.send_to(&frame_buf[..frame_len], remote_host).await;
+
+                // 2. 10 Hz 지자기 데이터 발행
+                if div_10hz == 0 {
+                    let env = *ENV_DATA.lock().await;
+                    let cdr_len = Ros2Cdr::encode_mag(&mut cdr_buf, snap.sec, snap.nanosec, env.mag_tesla, &cov_mag);
+                    seq = seq.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
+                    let key_mag = "0/nucleo/imu/mag/sensor_msgs::msg::dds_::MagneticField_/RIHS01_e80f32f56a20486c9923008fc1a1db07bbb273cbbf6a5b3bfa00835ee00e4dff";
+                    let frame_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, key_mag, Some(&att_buf), &cdr_buf[..cdr_len]);
+                    let _ = socket.send_to(&frame_buf[..frame_len], remote_host).await;
+                }
+
+                // 3. 1 Hz 기압, 온도, 습도 발행 및 Liveliness Token 갱신
+                if div_1hz == 0 {
+                    let env = *ENV_DATA.lock().await;
+
+                    // Pressure
+                    let p_len = Ros2Cdr::encode_pressure(&mut cdr_buf, snap.sec, snap.nanosec, env.pressure_pa, 0.0);
+                    seq = seq.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
+                    let key_press = "0/nucleo/pressure/sensor_msgs::msg::dds_::FluidPressure_/RIHS01_22dfb2b145a0bd5a31a1ac3882a1b32148b51d9b2f3bab250290d66f3595bc32";
+                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, key_press, Some(&att_buf), &cdr_buf[..p_len]);
+                    let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
+
+                    // Temperature
+                    let t_len = Ros2Cdr::encode_temperature(&mut cdr_buf, snap.sec, snap.nanosec, env.temperature_c, 0.0);
+                    seq = seq.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
+                    let key_temp = "0/nucleo/temperature/sensor_msgs::msg::dds_::Temperature_/RIHS01_72514a14126ab9f8a9abec974c78e5610a367b59db5da355ff1fb982d5bad4b8";
+                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, key_temp, Some(&att_buf), &cdr_buf[..t_len]);
+                    let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
+
+                    // Humidity
+                    let h_len = Ros2Cdr::encode_humidity(&mut cdr_buf, snap.sec, snap.nanosec, env.humidity_ratio, 0.0);
+                    seq = seq.wrapping_add(1);
+                    ZenohWire::build_rmw_attachment(&mut att_buf, seq as i64, time_ns, &zid_bytes);
+                    let key_hum = "0/nucleo/humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_8687c99b4fb393cb2e545e407b5ea7fd0b5d8960bcd849a0f86c544740138839";
+                    let f_len = ZenohWire::build_push_put_with_attachment(&mut frame_buf, seq, key_hum, Some(&att_buf), &cdr_buf[..h_len]);
+                    let _ = socket.send_to(&frame_buf[..f_len], remote_host).await;
+
+                    // 4. ROS 2 Jazzy Liveliness Token 정기 발행 (1 Hz)
+                    let lv_tokens = [
+                        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/0/NN/%/%/nucleo_h743zi2",
+                        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/11/MP/%/%/nucleo_h743zi2/%nucleo%imu%data/sensor_msgs::msg::dds_::Imu_/RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b/::,:,:,:,,",
+                        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/12/MP/%/%/nucleo_h743zi2/%nucleo%imu%mag/sensor_msgs::msg::dds_::MagneticField_/RIHS01_e80f32f56a20486c9923008fc1a1db07bbb273cbbf6a5b3bfa00835ee00e4dff/::,:,:,:,,",
+                        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/13/MP/%/%/nucleo_h743zi2/%nucleo%pressure/sensor_msgs::msg::dds_::FluidPressure_/RIHS01_22dfb2b145a0bd5a31a1ac3882a1b32148b51d9b2f3bab250290d66f3595bc32/::,:,:,:,,",
+                        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/14/MP/%/%/nucleo_h743zi2/%nucleo%temperature/sensor_msgs::msg::dds_::Temperature_/RIHS01_72514a14126ab9f8a9abec974c78e5610a367b59db5da355ff1fb982d5bad4b8/::,:,:,:,,",
+                        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/15/MP/%/%/nucleo_h743zi2/%nucleo%humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_8687c99b4fb393cb2e545e407b5ea7fd0b5d8960bcd849a0f86c544740138839/::,:,:,:,,",
+                        "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/21/SS/%/%/nucleo_h743zi2/%nucleo%set_led/example_interfaces::srv::dds_::SetBool_/RIHS01_a69782e5631b12e15c8e218410de1685bbf13e382718295adad14037a24afbe8/::,:,:,:,,",
+                    ];
+                    for (i, &lv) in lv_tokens.iter().enumerate() {
                         seq = seq.wrapping_add(1);
-                        let rep_len = ZenohWire::build_reply(&mut frame_buf, seq, q_id, &cdr_buf[..resp_len]);
-                        let _ = socket.send_to(&frame_buf[..rep_len], remote).await;
+                        let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, seq, (i + 10) as u32, lv);
+                        let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
+
+                        seq = seq.wrapping_add(1);
+                        let lv_len = ZenohWire::build_push_put(&mut frame_buf, seq, lv, &[]);
+                        let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
                     }
                 }
             }
+            Either::Second(Ok((len, remote))) => {
+                if !session_established {
+                    if let Some(cookie) = ZenohWire::parse_init_ack(&rx_packet[..len]) {
+                        info!("[Zenoh] InitAck 수신! Cookie 길이: {=usize}. OpenSyn 전송...", cookie.len());
+                        let open_len = ZenohWire::build_open_syn(&mut frame_buf, cookie);
+                        let _ = socket.send_to(&frame_buf[..open_len], remote_host).await;
+                    } else if ZenohWire::is_open_ack(&rx_packet[..len]) {
+                        info!("[Zenoh] OpenAck 수신! Zenoh 세션 수립(Established) 성공! 텔레메트리 스트리밍 시작.");
+                        session_established = true;
+                        seq = 0;
+
+                        // 1. /nucleo/set_led Queryable 등록 (DECLARE_QUERYABLE)
+                        let key_srv = "0/nucleo/set_led/example_interfaces::srv::dds_::SetBool_/RIHS01_a69782e5631b12e15c8e218410de1685bbf13e382718295adad14037a24afbe8";
+                        seq = seq.wrapping_add(1);
+                        let qable_len = ZenohWire::build_declare_queryable(&mut frame_buf, seq, 1, key_srv);
+                        let _ = socket.send_to(&frame_buf[..qable_len], remote_host).await;
+
+                        // 2. 세션 수립 즉시 ROS 2 Jazzy Liveliness Token 발행
+                        let lv_tokens = [
+                            "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/0/NN/%/%/nucleo_h743zi2",
+                            "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/11/MP/%/%/nucleo_h743zi2/%nucleo%imu%data/sensor_msgs::msg::dds_::Imu_/RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b/::,:,:,:,,",
+                            "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/12/MP/%/%/nucleo_h743zi2/%nucleo%imu%mag/sensor_msgs::msg::dds_::MagneticField_/RIHS01_e80f32f56a20486c9923008fc1a1db07bbb273cbbf6a5b3bfa00835ee00e4dff/::,:,:,:,,",
+                            "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/13/MP/%/%/nucleo_h743zi2/%nucleo%pressure/sensor_msgs::msg::dds_::FluidPressure_/RIHS01_22dfb2b145a0bd5a31a1ac3882a1b32148b51d9b2f3bab250290d66f3595bc32/::,:,:,:,,",
+                            "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/14/MP/%/%/nucleo_h743zi2/%nucleo%temperature/sensor_msgs::msg::dds_::Temperature_/RIHS01_72514a14126ab9f8a9abec974c78e5610a367b59db5da355ff1fb982d5bad4b8/::,:,:,:,,",
+                            "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/15/MP/%/%/nucleo_h743zi2/%nucleo%humidity/sensor_msgs::msg::dds_::RelativeHumidity_/RIHS01_8687c99b4fb393cb2e545e407b5ea7fd0b5d8960bcd849a0f86c544740138839/::,:,:,:,,",
+                            "@ros2_lv/0/100f0e0d0c0b0a090807060504030201/0/21/SS/%/%/nucleo_h743zi2/%nucleo%set_led/example_interfaces::srv::dds_::SetBool_/RIHS01_a69782e5631b12e15c8e218410de1685bbf13e382718295adad14037a24afbe8/::,:,:,:,,",
+                        ];
+                        for (i, &lv) in lv_tokens.iter().enumerate() {
+                            seq = seq.wrapping_add(1);
+                            let lv_decl_len = ZenohWire::build_declare_token(&mut frame_buf, seq, (i + 10) as u32, lv);
+                            let _ = socket.send_to(&frame_buf[..lv_decl_len], remote_host).await;
+
+                            seq = seq.wrapping_add(1);
+                            let lv_len = ZenohWire::build_push_put(&mut frame_buf, seq, lv, &[]);
+                            let _ = socket.send_to(&frame_buf[..lv_len], remote_host).await;
+                        }
+                    }
+                    continue;
+                }
+
+                if let Some((msg_type, key_expr, q_id, payload)) = ZenohWire::parse_frame(&rx_packet[..len]) {
+                    if key_expr.contains("cmd_vel") && (msg_type == msg_id::PUSH || msg_type == msg_id::PUT) {
+                        let actual_payload = if let Some(pos) = payload.windows(4).position(|w| w == [0x00, 0x01, 0x00, 0x00]) {
+                            &payload[pos..]
+                        } else {
+                            payload
+                        };
+                        if let Some(([lx, _ly, _lz], [_ax, _ay, az])) = Ros2Cdr::decode_twist(actual_payload) {
+                            info!("[ROS2 cmd_vel] linear.x={=f64} m/s, angular.z={=f64} rad/s", lx, az);
+                        }
+                    } else if (key_expr.contains("set_led") || key_expr.is_empty()) && (msg_type == msg_id::QUERY || msg_type == msg_id::REQUEST) {
+                        let actual_payload = if let Some(pos) = payload.windows(4).position(|w| w == [0x00, 0x01, 0x00, 0x00]) {
+                            &payload[pos..]
+                        } else {
+                            payload
+                        };
+                        if let Some(turn_on) = Ros2Cdr::decode_set_bool_request(actual_payload) {
+                            let mut led_guard = USER_LED.lock().await;
+                            if let Some(ref mut led) = *led_guard {
+                                if turn_on {
+                                    led.set_high();
+                                } else {
+                                    led.set_low();
+                                }
+                            }
+                            info!("[ROS2 Service] /nucleo/set_led -> data={=bool} 처리 완료", turn_on);
+
+                            // Response 직렬화 및 Zenoh REPLY 전송
+                            let resp_len = Ros2Cdr::encode_set_bool_response(
+                                &mut cdr_buf,
+                                true,
+                                if turn_on { "LED ON" } else { "LED OFF" },
+                            );
+                            seq = seq.wrapping_add(1);
+                            ZenohWire::build_rmw_attachment(&mut att_buf, 1, 0, &zid_bytes);
+                            let key_srv = "0/nucleo/set_led/example_interfaces::srv::dds_::SetBool_/RIHS01_a69782e5631b12e15c8e218410de1685bbf13e382718295adad14037a24afbe8";
+                            let rep_len = ZenohWire::build_reply(&mut frame_buf, seq, q_id, key_srv, Some(&att_buf), &cdr_buf[..resp_len]);
+                            let _ = socket.send_to(&frame_buf[..rep_len], remote).await;
+                        }
+                    }
+                }
+            }
+            Either::Second(Err(_)) => {}
         }
     }
 }

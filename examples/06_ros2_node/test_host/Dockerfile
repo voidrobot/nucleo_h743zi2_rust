@@ -9,6 +9,7 @@ ENV ROS_DOMAIN_ID=0
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-rmw-zenoh-cpp \
     ros-jazzy-rviz2 \
+    ros-jazzy-example-interfaces \
     python3-colcon-common-extensions \
     && rm -rf /var/lib/apt/lists/*
 

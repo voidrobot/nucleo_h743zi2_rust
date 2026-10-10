@@ -24,6 +24,23 @@ class AhrsVerifierNode(Node):
         super().__init__('ahrs_verifier_node')
         self.get_logger().info('>>> [Host Verifier] NUCLEO-H743ZI2 ROS 2 검증 시작 <<<')
 
+        # Type Hash 및 Zenoh KeyExpr 조사 출력 (선택적)
+        try:
+            from rclpy.type_support import get_message_type_hash
+            for name, cls in [
+                ('/nucleo/imu/data', Imu),
+                ('/nucleo/imu/mag', MagneticField),
+                ('/nucleo/pressure', FluidPressure),
+                ('/nucleo/temperature', Temperature),
+                ('/nucleo/humidity', RelativeHumidity),
+                ('/nucleo/cmd_vel', Twist),
+            ]:
+                th = get_message_type_hash(cls)
+                type_name = f"{cls.__module__.replace('.', '::')}::dds_::{cls.__name__}_"
+                self.get_logger().info(f"[KeyExpr Info] {name} -> type: {type_name}, hash: {th}")
+        except Exception as e:
+            self.get_logger().debug(f"Type hash check skipped: {e}")
+
         # 통계 카운터
         self.imu_count = 0
         self.mag_count = 0
@@ -118,9 +135,9 @@ class AhrsVerifierNode(Node):
             self.get_logger().info(f'=====================================================')
             sys.exit(0)
 
-        # 4. 타임아웃 판정 (15초)
-        if elapsed > 15.0:
-            self.get_logger().error(f'[타임아웃] 15초 내 검증 기준 미달 (IMU: {self.imu_count}, Mag: {self.mag_count}, Srv: {self.service_success})')
+        # 4. 타임아웃 판정 (30초)
+        if elapsed > 30.0:
+            self.get_logger().error(f'[타임아웃] 30초 내 검증 기준 미달 (IMU: {self.imu_count}, Mag: {self.mag_count}, Srv: {self.service_success})')
             sys.exit(1)
 
     def cb_service_done(self, future):
