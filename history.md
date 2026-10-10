@@ -1,34 +1,41 @@
 # 프로젝트 개발 히스토리 (History)
 
-본 문서는 NUCLEO-H743ZI2 및 X-NUCLEO-IKS01A3 기반 Rust 임베디드 펌웨어 프로젝트의 일자별 주요 마일스톤 및 커밋 내역을 기록한다.
+본 문서는 NUCLEO-H743ZI2 및 X-NUCLEO-IKS01A3 기반 Rust 임베디드 펌웨어 프로젝트의 일자별 깃 커밋 내역과 주요 엔지니어링 마일스톤을 기록한다.
+
+---
+
+## 2026.10.11
+
+- **공용 미들웨어 크레이트 `crates/zenoh-ros2` 승격 및 OCP 리팩토링 (`39d5445`)**:
+  - **독립 크레이트 추출**: STM32/NUCLEO 의존성이 0%인 순수 `no_std`, Zero-allocation ROS 2 클라이언트(`crates/zenoh-ros2`) 신설 (`wire`, `cdr`, `traits`, `types`).
+  - **엔티티 캡슐화**: 단조 증가 시퀀스 번호(`seq: i64`) 은닉 `Publisher<T>`, 토픽 매칭 `Subscriber<T>`, 쿼리어블 `ServiceServer<S>`, 자율 등록 `DiscoveryRegistry` 구현.
+  - **단일 CPU 최적화 태스크 분리**: `task_sub_cmd_vel` 및 `task_srv_set_led`를 각자의 `loop`를 소유한 `embassy_executor::task`로 분리하고 비동기 `Channel` 연동.
+  - **전수 검증**: 호스트 단위 테스트(3/3 PASS), 크로스 컴파일(0 warning), 보드 실기 플래시 및 Docker E2E 하네스 무회귀(Zero-Loss) 100% 통과.
 
 ---
 
 ## 2026.10.10
 
-- **so3-inekf 오라클 차등 테스트(Differential Testing) 전수 검증**: `[dev-dependencies]`에 `nalgebra` 격리 도입, $SO(3)$ 리 군(Exp/Log/Adjoint), 여인수 역행렬, InEKF 조셉 공분산 갱신, 2,000스텝 촐레스키 양정치성($\lambda_i > 0$), 3D 궤적 시뮬레이션(RMSE $1.85^\circ$) 19개 테스트 100% 통과 (타깃 MCU 105 KB 오염 0%).
-- **Embassy Zero-Fork 하드웨어 DWT 유휴 역산(Idle Inversion) CPU 프로파일링 구현**:
-  - `#[embassy_executor::main]` 제거 및 `raw::Executor::new(core::ptr::null_mut())` 기반 커스텀 메인 루프 도입 (Embassy 라이브러리 포크/수정 0%).
-  - 메인 루프 `cortex_m::asm::wfe()` 전후 DWT 사이클 카운터 계측으로 슬립 사이클 구간 $C_{\text{wfe\_span}}$ 누적.
-  - 고우선순위 선점 인터럽트(`InterruptExecutor`) 도메인 InEKF 순수 연산 사이클 $C_{\text{rt}}$ 분리 차감 및 1초 단위 실제 DWT 총 사이클 기반 동적 자가 보정(Self-Calibrating) 알고리즘 적용 (매직 넘버 0개, 클럭 주파수 오차 0%).
-- **05_mixed_cpp_legacy (Mixed Language Rust + Legacy C++)**:
-  - `build.rs` + `cc` 크레이트 및 `clang++-18` 기반 Cortex-M7 (`thumbv7em-none-eabihf`, Hard-float FPU) C++ 크로스 컴파일 파이프라인 구축.
-  - `-fno-exceptions`, `-fno-rtti`, `-fno-unwind-tables`, `cpp_link_stdlib(None)`을 통한 순수 자립형(Freestanding) C++ 런타임 제로화.
-  - 2차 IIR Biquad 저주파 통과 필터(Direct Form II Transposed) C++ 클래스 및 Zero-Allocation C-ABI 브리지 구현 (Flash 28 KB, RAM 33.4 KB).
-  - Rust Newtype Safe RAII 래퍼(`SafeBiquadFilter`, 32B 인라인 저장소)로 C++ 인스턴스 라이프사이클 캡슐화.
-  - NUCLEO-H743ZI2 물리 보드 플래시 및 100 Hz 비동기 I2C 가속도계 데이터 실시간 C++ 필터링 RTT 실측 검증 완료.
+- **06_ros2_node 임베디드 ROS 2 노드 구현 및 버그 수정 (`86c5ae1`, `7e4d19a`, `15a86bb`, `2892a61`)**:
+  - **Zenoh 1.0 UDP 직통 스택**: 별도 중계 데몬 없이 ROS 2 Jazzy `rmw_zenoh_cpp`와 직접 UDP 통신하는 5대 센서 텔레메트리 및 서비스 노드 구현.
+  - **프로토콜 결함 수정**: 토픽별 독립 GID/시퀀스 분리로 `A message was lost!!!` 해결, cmd_vel 구독자 토큰(MS) 등록으로 `pub --once` 매칭 대기 결함 해결.
+  - **Docker 격리 검증 하네스**: 호스트 브링업 컨테이너 및 100Hz 주기/지터, 서비스 응답 자동화 E2E 테스트(`run_test.sh`) 구축.
+- **05_mixed_cpp_legacy Rust + C++ 혼합 빌드 파이프라인 (`fa87139`, `518ab68`)**:
+  - `build.rs` + `clang++`/`arm-none-eabi-g++` 기반 Cortex-M7 Hard-float 크로스 컴파일 구축.
+  - 2차 IIR Biquad 저역 통과 필터 C++ 클래스, Zero-Allocation C-ABI 브리지 및 Rust Safe RAII 래퍼 연동 검증.
+- **워크스페이스 전역 리팩토링 및 정적 분석 (`30f5e71`, `65465c3`, `e340591`)**:
+  - 워크스페이스 전역 매직 넘버, 정수 절삭 및 블로킹 I2C 제거, `clippy` 린트 적용 및 SSOT 원칙 확립.
+- **CPU 부하 프로파일링 및 InEKF 차등 검증 (`38b7b18`, `f1f0541`, `211e4c4`)**:
+  - Zero-Fork DWT 유휴 역산(Idle Inversion) 계측 및 리눅스 `/proc/stat` 1kHz 틱 샘플링 엔진 구현.
+  - `nalgebra` 참조 모델 대비 $SO(3)$ 리 군, 조셉 공분산, 촐레스키 양정치성 19개 오라클 차등 테스트 100% 통과.
 
+---
 
 ## 2026.10.09
 
-- **프로젝트 초기화 & 멀티 크레이트 아키텍처 수립**: NUCLEO-H743ZI2 및 X-NUCLEO-IKS01A3 기반 임베디드 Rust 툴체인(`thumbv7em-none-eabihf`), `nucleo-bsp` 및 거버넌스 규칙(`AGENTS.md`) 구축.
-- **01_blinky**: 온보드 3색 LED 순차 점멸, `defmt` + RTT 무간섭 초고속 로깅 파이프라인 및 Embassy 스케줄링 검증.
-- **02_sensor_all_sampling**: IKS01A3 6종 센서 허브, LSM6DSO 416Hz 오버샘플링/LPF2 안티-에일리어싱, 선점형 `InterruptExecutor` 기반 100Hz RT 제어(지터 0 µs) 달성.
-- **03_sensor_web_dashboard**: LAN8742A RMII 이더넷 드라이버 및 DHCPv4 자동 연동, 포트 80 비동기 웹서버 및 실시간 텔레메트리 REST API 서빙.
-- **so3-inekf 수학 코어 개발**: 리 군 $SO(3)$ Rodrigues 지수 사상(Exp/Log) 및 6차원 우불변 InEKF 상수 야코비/Joseph 공분산 엔진 구현 (호스트 단위 테스트 통과).
-- **04_ahrs_so3_inekf**: 100Hz NVIC 선점 RT-IMU 루프와 지자기 관측 보정 결합 고정밀 AHRS 구현.
-- **정지 감지(ZARU) & 1D 지자기 디커플링**: 가속도 바이어스 추정 배제, 정지 시 각속도 적분 동결(Yaw 드리프트 제거), 수평각(Roll/Pitch) 지자기 왜곡 간섭 100% 차단.
-- **3D 자세 시각화 엔진 개편**: Body Frame RGB 3축(빨강/초록/파랑) 슬림 직육면체 3D 모델 및 $\pm 180^\circ$ 연속 각도 언래핑 적용.
-- **비침습적 CPU 부하 계측**: `.await` I/O 대기 배제, InEKF 순수 연산 지연(~600 µs) 및 실질 CPU 사용률(~7%) 정밀 산출, DWT 카운터 활성화 및 대시보드 네온 배지 연동.
-- **예제 빌드 가이드 표준화**: `examples/*` 전체 README에 크로스 컴파일, 릴리스 최적화, 메모리 풋프린트(`cargo size`) 가이드 체계화.
-
+- **프로젝트 초기화 및 멀티 크레이트 아키텍처 수립 (`f93bdf7`, `b813668`, `64dd3b9`)**:
+  - NUCLEO-H743ZI2 및 IKS01A3 툴체인(`thumbv7em-none-eabihf`), 공용 BSP(`crates/nucleo-bsp`) 및 거버넌스(`AGENTS.md`) 구축.
+- **01_blinky**: 온보드 3색 LED 순차 점멸, `defmt` + RTT 로깅 파이프라인 및 Embassy 비동기 스케줄링 검증.
+- **02_sensor_all_sampling**: 6종 센서 I2C 허브, LSM6DSO 416Hz 오버샘플링/LPF2 안티-에일리어싱, 선점형 `InterruptExecutor` 100Hz RT 제어(지터 0 µs) 달성.
+- **03_sensor_web_dashboard**: LAN8742A RMII 이더넷 드라이버, DHCPv4 IP 자동 연동 및 실시간 텔레메트리 포트 80 HTTP/REST 웹서버 서빙.
+- **04_ahrs_so3_inekf**: $SO(3)$ 우불변 InEKF 9축 자세 추정기, 정지 감지(ZARU), 1D 지자기 디커플링 및 WebGL 3D 쿼터니언 대시보드 구현.
